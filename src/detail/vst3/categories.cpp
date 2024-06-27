@@ -70,7 +70,7 @@ static const struct _translate
   {   CLAP_PLUGIN_FEATURE_DRUM_MACHINE          , "Drum"},
 
   {   CLAP_PLUGIN_FEATURE_FILTER                , "Filter"},
-  {   CLAP_PLUGIN_FEATURE_PHASER                , "Modulation"          },
+  {   CLAP_PLUGIN_FEATURE_PHASER                , "Modulation"},
   {   CLAP_PLUGIN_FEATURE_EQUALIZER             , "EQ"},
   {   CLAP_PLUGIN_FEATURE_DEESSER               , "Restoration"},
   {   CLAP_PLUGIN_FEATURE_PHASE_VOCODER         , "Modulation"},
@@ -102,7 +102,7 @@ static const struct _translate
   {   CLAP_PLUGIN_FEATURE_MIXING                , "Mixing"},
   {   CLAP_PLUGIN_FEATURE_MASTERING             , "Mastering"},
 
-  {   CLAP_PLUGIN_FEATURE_ARA_SUPPORTED         , "OnlyARA" },
+/*{   CLAP_PLUGIN_FEATURE_ARA_SUPPORTED         , "OnlyARA" }, in VST3, this is being checked wether the factory is available or not */
   {   CLAP_PLUGIN_FEATURE_ARA_REQUIRED          , "OnlyARA" },
 
   {   "external"                                , "External"},
