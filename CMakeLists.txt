@@ -23,8 +23,11 @@
 # CLAP_WRAPPER_COPY_AFTER_BUILD if included mac and lin will copy to ~/... (lin t/k)
 
 cmake_minimum_required(VERSION 3.21)
+cmake_policy(SET CMP0074 NEW)
 cmake_policy(SET CMP0091 NEW)
 cmake_policy(SET CMP0149 NEW)
+cmake_policy(SET CMP0159 NEW)
+
 if (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
 	message(STATUS "[clap-wrapper]: OSX_DEPLOYEMNT_TARGET is undefined. Setting to 10.13")
 	set(CMAKE_OSX_DEPLOYMENT_TARGET 10.13 CACHE STRING "Minimum macOS version")
@@ -109,6 +112,13 @@ else()
 
 	string(MAKE_C_IDENTIFIER ${CLAP_WRAPPER_OUTPUT_NAME} pluginname)
 
+	add_library(${pluginname}_as_aax MODULE)
+	target_add_aax_wrapper(
+		TARGET ${pluginname}_as_aax
+		OUTPUT_NAME "${CLAP_WRAPPER_OUTPUT_NAME}"
+	)
+
+	if(false)
 	# Link the actual plugin library
 	add_library(${pluginname}_as_vst3 MODULE)
 	target_add_vst3_wrapper(
@@ -119,7 +129,7 @@ else()
 			BUNDLE_IDENTIFIER "${CLAP_WRAPPER_BUNDLE_IDENTIFIER}"
 			BUNDLE_VERSION "${CLAP_WRAPPER_BUNDLE_VERSION}"
 			)
-
+	endif()
 	if (APPLE)
 		if (${CLAP_WRAPPER_BUILD_AUV2})
 			add_library(${pluginname}_as_auv2 MODULE)

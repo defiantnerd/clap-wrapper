@@ -23,7 +23,7 @@ include(cmake/base_sdks.cmake)
 guarantee_clap()
 guarantee_clap_wrapper_shared()
 
-
 include(cmake/wrap_auv2.cmake)
 include(cmake/wrap_vst3.cmake)
+include(cmake/wrap_aax.cmake)
 include(cmake/wrap_standalone.cmake)
