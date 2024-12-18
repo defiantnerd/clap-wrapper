@@ -389,22 +389,9 @@ endif()
     target_include_directories(base-sdk-aax PUBLIC ${AAX_SDK_ROOT}/Interfaces ${AAX_SDK_ROOT}/Interfaces/ACF)
     target_compile_options(base-sdk-aax PUBLIC $<IF:$<CONFIG:Debug>,-DDEVELOPMENT=1,-DRELEASE=1>) # work through steinbergs alternate choices for these
     target_link_libraries(base-sdk-aax PUBLIC clap-wrapper-sanitizer-options)
-    # if ( false )
-    #     # The VST3SDK uses sprintf, not snprintf, which macOS flags as deprecated
-    #     # to move people to snprintf. Silence that warning on the VST3 build
-    #     if (APPLE)
-    #         target_compile_options(base-sdk-vst3 PUBLIC -Wno-deprecated-declarations)
-    #     endif()
-    #     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    #         # The VST3 SDK confuses lld and long long int in format statements in some situations it seems
-    #         target_compile_options(base-sdk-vst3 PUBLIC -Wno-format)
-    # 
-    #         # The SDK also does things like `#warning DEPRECATED No Linux implementation
-    #         #	assert (false && "DEPRECATED No Linux implementation");` for some methods which
-    #         # generates a cpp warning. Since we won't fix this do
-    #         target_compile_options(base-sdk-vst3 PUBLIC -Wno-cpp)
-    #     endif()
-    # endif()
+
+    # finally pass to parent scope
+    set(AAX_SDK_ROOT ${AAX_SDK_ROOT} PARENT_SCOPE)
 
 endfunction(guarantee_aaxsdk)
 
