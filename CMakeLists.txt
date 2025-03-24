@@ -118,7 +118,7 @@ else()
 		OUTPUT_NAME "${CLAP_WRAPPER_OUTPUT_NAME}"
 	)
 
-	if(false)
+	if(true)
 	# Link the actual plugin library
 	add_library(${pluginname}_as_vst3 MODULE)
 	target_add_vst3_wrapper(

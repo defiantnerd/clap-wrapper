@@ -256,35 +256,26 @@ function(guarantee_aaxsdk)
     # check 
 
     MESSAGE("AAX SDK identified, checking version...")
-    # ------------------------------------------------------------------------------
-    # Setze die Datei, die den Content enthält
-set(INPUT_FILE "${AAX_SDK_ROOT}/Interfaces/AAX_Version.h")
+    # ------------------------------------------------------------------------------    
+    set(INPUT_FILE "${AAX_SDK_ROOT}/Interfaces/AAX_Version.h")
 
-# Lese die Zeilen aus der Datei, die die Versionsnummer enthalten
-#file(STRINGS ${INPUT_FILE} file_content REGEX "#define\\s+AAX_SDK_VERSION.*")
-#file(STRINGS ${INPUT_FILE} file_content REGEX "#define\\s+AAX_SDK_VERSION.*") #"s+\\(\\s*0x([0-9A-Fa-f]+)\\s*\\)")
-#string(REPLACE "\r\n" "\n" file_content "${file_content}")
-#string(REPLACE "\r" "\n" file_content "${file_content}")
-#string(REPLACE "\n" "\r\n" file_content "${file_content}")
+    file(STRINGS ${INPUT_FILE} file_content REGEX "^#define\\s+AAX_SDK_VERSION\\s+.*") 
+    message("Content is: \r\n${file_content}")
 
-#set(file_content "  #define AAX_SDK_VERSION ( 0x0208 )  " )
-file(STRINGS ${INPUT_FILE} file_content REGEX "^#define\\s+AAX_SDK_VERSION\\s+.*") 
-message("Content is: \r\n${file_content}")
-
-# Überprüfe, ob eine Übereinstimmung gefunden wurde
-if (file_content)
-    string(REGEX MATCH "0x([0-9A-Fa-f]+)" match ${file_content})
-    #string(REGEX MATCH "#define\\s+AAX_SDK_VERSION\\s+\\(\\s*0x([0-9A-Fa-f]+)\\s*\\)" match ${file_content})
-    message("${CMAKE_MATCH_1}")
-    if (match)
-        set(version_number "${CMAKE_MATCH_1}")
-        message(STATUS "Gefundene Versionsnummer: ${version_number}")
+    # Überprüfe, ob eine Übereinstimmung gefunden wurde
+    if (file_content)
+        string(REGEX MATCH "0x([0-9A-Fa-f]+)" match ${file_content})
+        #string(REGEX MATCH "#define\\s+AAX_SDK_VERSION\\s+\\(\\s*0x([0-9A-Fa-f]+)\\s*\\)" match ${file_content})
+        message("${CMAKE_MATCH_1}")
+        if (match)
+            set(version_number "${CMAKE_MATCH_1}")
+            message(STATUS "AAX SDK Version determined: ${version_number}")
+        else()
+            message(STATUS "No AAX Version found.")
+        endif()
     else()
-        message(STATUS "Keine Übereinstimmung gefunden.")
+        message(STATUS "No AAX Version found.")
     endif()
-else()
-    message(STATUS "Keine Übereinstimmung gefunden.")
-endif()
 
 
     # ----------------------------------------------------------------------------
@@ -337,7 +328,6 @@ endif()
 
     target_sources(base-sdk-aax PRIVATE
             ${AAX_GLOB}
-            # ${vst3platform} aax?
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CACFUnknown.cpp
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CChunkDataParser.cpp
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CEffectDirectData.cpp
@@ -358,7 +348,7 @@ endif()
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_IEffectGUI.cpp
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_IEffectParameters.cpp
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_IHostProcessor.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_Init.cpp
+            # ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_Init.cpp
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_ISessionDocumentClient.cpp
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_ITaskAgent.cpp
             ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_Properties.cpp
@@ -386,8 +376,13 @@ endif()
 
     MESSAGE("guarantee aax SDK: added sources")
 
-    target_include_directories(base-sdk-aax PUBLIC ${AAX_SDK_ROOT}/Interfaces ${AAX_SDK_ROOT}/Interfaces/ACF)
-    target_compile_options(base-sdk-aax PUBLIC $<IF:$<CONFIG:Debug>,-DDEVELOPMENT=1,-DRELEASE=1>) # work through steinbergs alternate choices for these
+    target_include_directories(base-sdk-aax PUBLIC 
+        ${AAX_SDK_ROOT}/Interfaces 
+        ${AAX_SDK_ROOT}/Interfaces/ACF 
+        ${AAX_SDK_ROOT}/Extensions
+        ${AAX_SDK_ROOT}/Libs
+    )
+    # target_compile_options(base-sdk-aax PUBLIC $<IF:$<CONFIG:Debug>,-DDEVELOPMENT=1,-DRELEASE=1>) # work through steinbergs alternate choices for these
     target_link_libraries(base-sdk-aax PUBLIC clap-wrapper-sanitizer-options)
 
     # finally pass to parent scope

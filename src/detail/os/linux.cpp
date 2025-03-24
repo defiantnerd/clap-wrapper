@@ -7,7 +7,10 @@
     - get binary name
 */
 
+#ifdef CLAP_WRAPPER_BUILD_FOR_VST3
 #include "public.sdk/source/main/moduleinit.h"
+#endif
+
 #include "osutil.h"
 #include <filesystem>
 #include <stdio.h>
@@ -51,8 +54,13 @@ class LinuxHelper
 	} gWindowsHelper;
 #endif
 
-static Steinberg::ModuleInitializer createMessageWindow([] { gLinuxHelper.init(); });
-static Steinberg::ModuleTerminator dropMessageWindow([] { gLinuxHelper.terminate(); });
+#ifdef CLAP_WRAPPER_BUILD_FOR_VST3
+	static Steinberg::ModuleInitializer createMessageWindow([] { os::init(); });
+static Steinberg::ModuleTerminator dropMessageWindow([] { os::terminate(); });
+#endif
+
+void init() { gLinuxHelper.init(); }
+void terminate() { gLinuxHelper.terminate(); }
 
 #if 0
 	static char* getModuleNameA()

@@ -69,6 +69,8 @@ function(target_add_vst3_wrapper)
 
     string(MAKE_C_IDENTIFIER ${V3_OUTPUT_NAME} outidentifier)
 
+    set_target_properties(${V3_TARGET} PROPERTIES DEBUG_POSTFIX "")
+
     target_sources(${V3_TARGET}
             PRIVATE
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/wrapasvst3_export_entry.cpp)

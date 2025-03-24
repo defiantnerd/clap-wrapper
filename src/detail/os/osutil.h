@@ -62,6 +62,12 @@ class IPlugObject
   {
   }
 };
+
+// this is a global init/terminate for the os layer helper objects
+// and should be called in the equivalent of DllMain
+void init();
+void terminate();
+
 void attach(IPlugObject* plugobject);
 void detach(IPlugObject* plugobject);
 uint64_t getTickInMS();

@@ -11,12 +11,18 @@
 
 #include <windows.h>
 #include <tchar.h>
-#include "public.sdk/source/main/moduleinit.h"
 #include "osutil.h"
 #include <filesystem>
 
-// from dllmain.cpp of the VST3 SDK
+#ifdef CLAP_WRAPPER_BUILD_FOR_VST3
+#include "public.sdk/source/main/moduleinit.h"
+
 extern HINSTANCE ghInst;
+#endif
+
+#if CLAP_WRAPPER_BUILD_FOR_AAX
+extern HINSTANCE ghInst;
+#endif
 
 namespace os
 {
@@ -43,8 +49,13 @@ class WindowsHelper
   std::vector<IPlugObject*> _plugs;
 } gWindowsHelper;
 
-static Steinberg::ModuleInitializer createMessageWindow([] { gWindowsHelper.init(); });
-static Steinberg::ModuleTerminator dropMessageWindow([] { gWindowsHelper.terminate(); });
+#ifdef CLAP_WRAPPER_BUILD_FOR_VST3
+static Steinberg::ModuleInitializer createMessageWindow([] { os::init(); });
+static Steinberg::ModuleTerminator dropMessageWindow([] { os::terminate(); });
+#endif
+
+void init() { gWindowsHelper.init(); }
+void terminate() { gWindowsHelper.terminate(); }
 
 static TCHAR* getModuleName()
 {

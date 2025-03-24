@@ -7,12 +7,11 @@ function(private_add_aax_wrapper_sources)
     target_compile_definitions(${tg} PUBLIC CLAP_WRAPPER_BUILD_FOR_AAX=1)
 
     if(WIN32)
-    # this was the VST3 module init stuff - probably we need this in AAX at some point, too   -- aax?
-    #    target_sources(${tg} PRIVATE ${sd}/src/detail/os/windows.cpp)
+        target_sources(${tg} PRIVATE ${sd}/src/detail/os/windows.cpp)
     elseif (APPLE)
-    #    target_sources(${tg} PRIVATE ${sd}/src/detail/os/macos.mm)
+        target_sources(${tg} PRIVATE ${sd}/src/detail/os/macos.mm)
     elseif(UNIX)
-    #    target_sources(${tg} PRIVATE ${sd}/src/detail/os/linux.cpp)
+        target_sources(${tg} PRIVATE ${sd}/src/detail/os/linux.cpp)
     endif()
 
    
@@ -52,7 +51,7 @@ function(target_add_aax_wrapper)
             )
     cmake_parse_arguments(AX "" "${oneValueArgs}" "" ${ARGN} )
 
-    message(INFO "target add aax wrapper")
+    message(INFO "target add aax wrapper: ${CLAP_WRAPPER_OUTPUT_NAME}")
 
     guarantee_aaxsdk()
 
@@ -69,21 +68,26 @@ function(target_add_aax_wrapper)
     string(MAKE_C_IDENTIFIER ${AX_OUTPUT_NAME} outidentifier)
 
     #maybe needed later
-    message(INFO AAX_SDK_ROOT: ${AAX_SDK_ROOT})
+    message(VERBOSE AAX_SDK_ROOT: ${AAX_SDK_ROOT})
+
+    set_target_properties(${AX_TARGET} PROPERTIES DEBUG_POSTFIX "")
+
 
     target_sources(${AX_TARGET}
             PRIVATE
-            ${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Alg.h
-            ${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_AlgProc.cpp
-            ${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Defs.h
-            ${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Describe.cpp
-            ${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Describe.h
-            ${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Parameters.h
-            ${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Parameters.cpp
+            #${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Alg.h
+            #${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_AlgProc.cpp
+            #${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Defs.h
+            #${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Describe.cpp
+            #${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Describe.h
+            #${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Parameters.h
+            #${AAX_SDK_ROOT}/ExamplePlugins/DemoGain/Source/DemoGain_Parameters.cpp
             ${AAX_SDK_ROOT}/Interfaces/AAX_Exports.cpp
 
             # ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/wrapasaax_export_entry.cpp
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/entry.cpp
+            ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/factory.cpp
+            ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/factory.h
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/wrapper.cpp
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/wrapper.h
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/categories.cpp
@@ -94,6 +98,9 @@ function(target_add_aax_wrapper)
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/plugview.h
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/process.cpp
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/process.h
+            ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/util.cpp
+            ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/detail/aax/util.h
+
 
             # ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/${sd}/src/wrapasaax_export_entry.cpp
             )
@@ -117,9 +124,12 @@ function(target_add_aax_wrapper)
                 clap-wrapper-shared-detail)
         target_link_libraries(${AX_TARGET}-clap-wrapper-aax-lib PRIVATE clap-wrapper-compile-options)
 
+        # no note expressions yet - this is a leftover from the vst3 setup
+        if (false)
         target_compile_options(${AX_TARGET}-clap-wrapper-aax-lib PRIVATE
                 -DCLAP_SUPPORTS_ALL_NOTE_EXPRESSIONS=$<IF:$<BOOL:${AX_SUPPORTS_ALL_NOTE_EXPRESSIONS}>,1,0>
                 )
+        endif(false)
     endif()
 
     set_target_properties(${AX_TARGET} PROPERTIES LIBRARY_OUTPUT_NAME "${CLAP_WRAPPER_OUTPUT_NAME}")

@@ -52,10 +52,13 @@ class MacOSHelper
 // standard specific extensions
 // ----------------------------------------------------------
 #ifdef CLAP_WRAPPER_BUILD_FOR_VST3
-static Steinberg::ModuleInitializer createMessageWindow([] { gMacOSHelper.init(); });
-static Steinberg::ModuleTerminator dropMessageWindow([] { gMacOSHelper.terminate(); });
+static Steinberg::ModuleInitializer createMessageWindow([] { os::init(); });
+static Steinberg::ModuleTerminator dropMessageWindow([] { os::terminate(); });
 #endif
 // ----------------------------------------------------------
+
+void init() { gMacOSHelper.init(); }
+void terminate() { gMacOSHelper.terminate(); }
 
 void MacOSHelper::init()
 {

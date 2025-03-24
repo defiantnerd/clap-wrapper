@@ -129,7 +129,6 @@ IPluginFactory* GetPluginFactoryEntryPoint()
 // #pragma comment(linker, "/EXPORT:" __FUNCTION__ "=" __FUNCDNAME__)
 #endif
 
-  // static IPtr<Steinberg::CPluginFactory> gPluginFactory = nullptr;
   static Clap::Library gClapLibrary;
 
   static std::vector<std::shared_ptr<CreationContext>> gCreationContexts;

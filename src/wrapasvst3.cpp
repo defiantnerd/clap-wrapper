@@ -3,6 +3,7 @@
 #include <pluginterfaces/base/ustring.h>
 #include <pluginterfaces/vst/ivstevents.h>
 #include <pluginterfaces/vst/ivstnoteexpression.h>
+#include <pluginterfaces/vst/vstspeaker.h>
 #include <public.sdk/source/vst/utility/stringconvert.h>
 #include <base/source/fstring.h>
 #include "detail/vst3/state.h"
@@ -11,6 +12,7 @@
 #include "detail/clap/fsutil.h"
 #include <locale>
 #include <sstream>
+
 
 #if WIN
 #include <tchar.h>
@@ -309,6 +311,9 @@ tresult PLUGIN_API ClapAsVst3::setProcessing(TBool state)
     {
       _processing = false;
       _plugin->stop_processing();
+      // VST3 has no specific reset - but it should happen when setprocessing is being called
+      // https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/Workflow+Diagrams/Audio+Processor+Call+Sequence.html
+      _plugin->reset();
     }
   }
   return result;
