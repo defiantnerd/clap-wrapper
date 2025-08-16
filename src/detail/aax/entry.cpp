@@ -60,7 +60,7 @@ extern "C" BOOL WINAPI DllMain ( HINSTANCE iInstance, DWORD iSelector, LPVOID iR
 	try
 	{
 		if ( iSelector == DLL_PROCESS_ATTACH )
-		{			
+		{
 			std::string ll("DllMain PROCESS_ATTACH: "); ll += os::getModulePath(); OutputDebugStringA(ll.c_str());
 			ghInst = iInstance;
 			os::init();

@@ -1,14 +1,7 @@
 #include "factory.h"
 
 #include "AAX.h"
-//#include "AAX_ICollection.h"
-//#include "AAX_IComponentDescriptor.h"
 #include "AAX_IEffectDescriptor.h"
-//#include "AAX_IPropertyMap.h"
-//#include "AAX_Exception.h"
-//#include "AAX_Errors.h"
-//#include "AAX_Assert.h"
-//#include "AAX_Init.h"
 
 namespace CLAPAAX
 {

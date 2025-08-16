@@ -25,8 +25,10 @@
 cmake_minimum_required(VERSION 3.21)
 cmake_policy(SET CMP0074 NEW)
 cmake_policy(SET CMP0091 NEW)
-cmake_policy(SET CMP0149 NEW)
 cmake_policy(SET CMP0159 NEW)
+if(WIN32)
+	cmake_policy(SET CMP0149 NEW)
+endif(WIN32)
 
 if (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
 	message(STATUS "[clap-wrapper]: OSX_DEPLOYEMNT_TARGET is undefined. Setting to 10.13")

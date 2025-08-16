@@ -11,57 +11,57 @@
 
 // clang_format off
 
-uint32_t fnv1a_keogh(const char* input)
-{
-  uint32_t hash = 0x811c9dc5;
-
-  while (*input) {
-    hash ^= *input++;
-    hash *= 0x01000193;
-
-    // LCG
-    hash = (0x19660d * hash) + 0x3c6ef35f;
-  }
-
-  return hash;
-}
-
-static inline char gen(uint32_t m)
-{
-  return "0123456789abcdef"[m & 0xF];
-}
-
-// creates a AAX string based id, which must not be larger than 32 characters.
-std::string createAAXId(clap_id id)
-{
-  std::string result;
-  uint32_t n = 32;
-  while (n > 0)
+  uint32_t fnv1a_keogh(const char* input)
   {
-    n -= 4;
-    result.push_back(gen(id >> n));
+    uint32_t hash = 0x811c9dc5;
+
+    while (*input) {
+      hash ^= *input++;
+      hash *= 0x01000193;
+
+      // LCG
+      hash = (0x19660d * hash) + 0x3c6ef35f;
+    }
+
+    return hash;
   }
-  return result;
-}
+
+  static inline char gen(uint32_t m)
+  {
+    return "0123456789abcdef"[m & 0xF];
+  }
+
+  // creates a AAX string based id, which must not be larger than 32 characters.
+  std::string createAAXId(clap_id id)
+  {
+    std::string result;
+    uint32_t n = 32;
+    while (n > 0)
+    {
+      n -= 4;
+      result.push_back(gen(id >> n));
+    }
+    return result;
+  }
 
 
-// an AAXID is a FourCC
-static const char _map[64] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz$";
-uint32_t AAXIDfromString(const char* str)
-{
-  // re-use the standard hash function
-  auto p = fnv1a_keogh(str);
+  // an AAXID is a FourCC
+  static const char _map[64] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz$";
+  uint32_t AAXIDfromString(const char* str)
+  {
+    // re-use the standard hash function
+    auto p = fnv1a_keogh(str);
 
-  // use only 24 bit of it
-  uint32_t res = _map[((p >> 0) & 0x3f)] << 24 | _map[((p >> 6) & 0x3f)] << 16 |
-                 _map[((p >> 12) & 0x3f)] << 8 | _map[((p >> 18) & 0x3f)];
-  return res;
-}
+    // use only 24 bit of it
+    uint32_t res = _map[((p >> 0) & 0x3f)] << 24 | _map[((p >> 6) & 0x3f)] << 16 |
+                   _map[((p >> 12) & 0x3f)] << 8 | _map[((p >> 18) & 0x3f)];
+    return res;
+  }
 
-uint32_t AAXIDfromString(const std::string& str)
-{
-  return AAXIDfromString(str.c_str());
-}
+  uint32_t AAXIDfromString(const std::string& str)
+  {
+    return AAXIDfromString(str.c_str());
+  }
 
 std::vector<std::string> generateShortStrings(const std::string& input)
 {
@@ -94,7 +94,7 @@ std::vector<std::string> generateShortStrings(const std::string& input)
   }
   result.push_back(threeword);
 
-  // Only the First and Last characters of a word
+  // Only the first and last characters of a word
   std::string firstLast;
   iss.clear();
   iss.str(input);

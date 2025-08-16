@@ -122,10 +122,7 @@ struct StandaloneHost : Clap::IHost
   {
     callbackRequested = true;
   }
-  void setupWrapperSpecifics(const clap_plugin_t *plugin) override
-  {
-    TRACE;
-  }
+  void setupWrapperSpecifics(const clap_plugin_t *plugin) override;
 
   bool saveStandaloneAndPluginSettings(const fs::path &intoDir, const fs::path &withName);
   bool tryLoadStandaloneAndPluginSettings(const fs::path &fromDir, const fs::path &withName);

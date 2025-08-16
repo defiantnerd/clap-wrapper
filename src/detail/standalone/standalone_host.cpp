@@ -317,6 +317,45 @@ static int64_t clapread(const struct clap_istream *s, void *buffer, uint64_t siz
   return -1;
 }
 
+namespace cfg {
+  clap_audio_port_configuration_request mono_out[]{
+    { false ,0,1, CLAP_PORT_MONO, nullptr}
+  };
+
+  const clap_audio_port_configuration_request mono_in_out[]{
+    { true,0,1,CLAP_PORT_MONO, nullptr},
+    { false,0,1,CLAP_PORT_MONO, nullptr},
+  };
+
+  const clap_audio_port_configuration_request stereo_out[]{
+        { false,0,2,CLAP_PORT_STEREO, nullptr},
+  };
+
+  const clap_audio_port_configuration_request stereo_in_out[]{
+        { true,0,2,CLAP_PORT_STEREO, nullptr},
+        { false,0,2,CLAP_PORT_STEREO, nullptr},
+        { false,1,2,CLAP_PORT_STEREO, nullptr},
+  };
+
+}  // namespace cfg
+
+void StandaloneHost::setupWrapperSpecifics(const clap_plugin_t* plugin)
+{
+  TRACE;
+  auto p = this->clapPlugin->_ext._configurable_audio_ports;
+  if (p)
+  {
+    // check
+    auto a1(p->can_apply_configuration(plugin, cfg::mono_out, 1) ? "yes," : "no,");
+    auto a2(p->can_apply_configuration(plugin, cfg::mono_in_out, 2)? "yes," : "no,");
+    auto a3(p->can_apply_configuration(plugin, cfg::stereo_out, 1)? "yes," : "no,");
+    auto a4(p->can_apply_configuration(plugin, cfg::stereo_in_out, 2)? "yes," : "no,");
+    auto a5(p->can_apply_configuration(plugin, cfg::stereo_in_out, 3)? "yes" : "no");
+
+    std::stringstream s; s << "config: " << a1 << a2 << a3 << a4 << a5;
+  }
+}
+
 bool StandaloneHost::saveStandaloneAndPluginSettings(const fs::path &intoDir, const fs::path &withName)
 {
   // This should obviously be a more robust file format. What we
