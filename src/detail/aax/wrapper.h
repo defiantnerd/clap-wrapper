@@ -13,7 +13,8 @@
 */
 
 #if WIN32
-#pragma warning( disable : 5033 )   // \aax-sdk-2-8-1\Interfaces\AAX_Atomic.h(191,26): warning C5033: 'register' is no longer a supported storage class
+#pragma warning( \
+    disable : 5033)  // \aax-sdk-2-8-1\Interfaces\AAX_Atomic.h(191,26): warning C5033: 'register' is no longer a supported storage class
 #endif
 
 // AAX headers
@@ -48,45 +49,48 @@
 class AAX_ICollection;
 class Wrapped_AAX_GUI;
 
-AAX_Result GetEffectDescriptions ( AAX_ICollection * outDescriptions );
+AAX_Result GetEffectDescriptions(AAX_ICollection* outDescriptions);
 AAX_CEffectParameters* AAX_CALLBACK ClapAsAAX_Create();
 
 class ClapAsAAX : public AAX_CEffectParameters,
-  public Clap::IHost,
-  public Clap::IAutomation,
-  public os::IPlugObject
+                  public Clap::IHost,
+                  public Clap::IAutomation,
+                  public os::IPlugObject
 {
-public:
+ public:
   friend class Wrapped_AAX_GUI;
   ClapAsAAX()
     : AAX_CEffectParameters()
-   , Clap::IHost()
-   , Clap::IAutomation()
-   , os::IPlugObject()
-   , _os_attached([this] { os::attach(this); }, [this] { os::detach(this); })
- {
- }
+    , Clap::IHost()
+    , Clap::IAutomation()
+    , os::IPlugObject()
+    , _os_attached([this] { os::attach(this); }, [this] { os::detach(this); })
+  {
+  }
 
- AAX_Result EffectInit() override;
- AAX_Result ResetFieldData(AAX_CFieldIndex iFieldIndex, void* oData, uint32_t iDataSize) const override;
- AAX_Result TimerWakeup() override;
- AAX_Result GetParameterIsAutomatable(AAX_CParamID iParameterID, AAX_CBoolean* itIs)  const override;
- AAX_Result GetParameterNumberOfSteps(AAX_CParamID iParameterID, int32_t* aNumSteps)  const override;
- AAX_Result GetParameterValueString(AAX_CParamID iParameterID, AAX_IString* oValueString, int32_t iMaxLength)  const override;
- AAX_Result GetParameterValueFromString(AAX_CParamID iParameterID, double* oValuePtr, const AAX_IString& iValueString)  const override;
- AAX_Result GetParameterStringFromValue(AAX_CParamID iParameterID, double value, AAX_IString* valueString, int32_t maxLength)  const override;
- AAX_Result GetParameterName(AAX_CParamID iParameterID, AAX_IString* oName) const override;
- AAX_Result GetParameterNameOfLength(AAX_CParamID iParameterID, AAX_IString* oName,
-                                     int32_t iNameLength) const override;
+  AAX_Result EffectInit() override;
+  AAX_Result ResetFieldData(AAX_CFieldIndex iFieldIndex, void* oData, uint32_t iDataSize) const override;
+  AAX_Result TimerWakeup() override;
+  AAX_Result GetParameterIsAutomatable(AAX_CParamID iParameterID, AAX_CBoolean* itIs) const override;
+  AAX_Result GetParameterNumberOfSteps(AAX_CParamID iParameterID, int32_t* aNumSteps) const override;
+  AAX_Result GetParameterValueString(AAX_CParamID iParameterID, AAX_IString* oValueString,
+                                     int32_t iMaxLength) const override;
+  AAX_Result GetParameterValueFromString(AAX_CParamID iParameterID, double* oValuePtr,
+                                         const AAX_IString& iValueString) const override;
+  AAX_Result GetParameterStringFromValue(AAX_CParamID iParameterID, double value,
+                                         AAX_IString* valueString, int32_t maxLength) const override;
+  AAX_Result GetParameterName(AAX_CParamID iParameterID, AAX_IString* oName) const override;
+  AAX_Result GetParameterNameOfLength(AAX_CParamID iParameterID, AAX_IString* oName,
+                                      int32_t iNameLength) const override;
 
- //---The Clunky Chunk-------------------------------------------------------------------
- AAX_Result GetNumberOfChunks(int32_t* oNumChunks) const override;
- AAX_Result GetChunkIDFromIndex(int32_t iIndex, AAX_CTypeID* oChunkID) const override;
- AAX_Result GetChunkSize(AAX_CTypeID iChunkID, uint32_t* oSize) const override;
- AAX_Result GetChunk(AAX_CTypeID iChunkID, AAX_SPlugInChunk* oChunk) const override;
- AAX_Result SetChunk(AAX_CTypeID iChunkID, const AAX_SPlugInChunk* iChunk) override;
+  //---The Clunky Chunk-------------------------------------------------------------------
+  AAX_Result GetNumberOfChunks(int32_t* oNumChunks) const override;
+  AAX_Result GetChunkIDFromIndex(int32_t iIndex, AAX_CTypeID* oChunkID) const override;
+  AAX_Result GetChunkSize(AAX_CTypeID iChunkID, uint32_t* oSize) const override;
+  AAX_Result GetChunk(AAX_CTypeID iChunkID, AAX_SPlugInChunk* oChunk) const override;
+  AAX_Result SetChunk(AAX_CTypeID iChunkID, const AAX_SPlugInChunk* iChunk) override;
 
- //---Clap::IHost------------------------------------------------------------------------
+  //---Clap::IHost------------------------------------------------------------------------
 
   void setupWrapperSpecifics(const clap_plugin_t* plugin) override;
 
@@ -129,24 +133,24 @@ public:
   bool context_menu_popup(const clap_context_menu_target_t* target, int32_t screen_index, int32_t x,
                           int32_t y) override;
 
-protected:
+ protected:
   void onIdle() override {};
   Clap::Library* _library = nullptr;
   std::shared_ptr<Clap::Plugin> _plugin;
 
-  void* _creationcontext = nullptr;  // context from the CLAP library 
+  void* _creationcontext = nullptr;  // context from the CLAP library
   os::State _os_attached;
 
   std::string _wrapper_hostname = "CLAP-As-AAX-Wrapper";
-  
+
   std::map<std::string, std::unique_ptr<AAXWrappedParameterInfo_t>> _parameterMap;
 
   AAX_IController* _aax_ctrl = nullptr;
 
   mutable Clap::StateMemento _state;
 
-private:
-    // from Clap::IAutomation
+ private:
+  // from Clap::IAutomation
   void onBeginEdit(clap_id id) override;
   void onPerformEdit(const clap_event_param_value_t* value) override;
   void onEndEdit(clap_id id) override;
