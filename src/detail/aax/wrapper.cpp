@@ -126,9 +126,11 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor* outDesc,
   err = properties->AddProperty(AAX_eProperty_CanBypass, true);
   // err = properties->AddProperty(AAX_eProperty_UsesClientGUI, true);  // Uses auto-GUI by the host
 
-  err = properties->AddProperty(AAX_eProperty_RequiresChunkCallsOnMainThread, true);  // for the CLAP this is mandatory
-  err = properties->AddProperty(AAX_eProperty_Constraint_Topology, AAX_eConstraintTopology_Monolithic); // no separate UI and DSP
-  // 
+  err = properties->AddProperty(AAX_eProperty_RequiresChunkCallsOnMainThread,
+                                true);  // for the CLAP this is mandatory
+  err = properties->AddProperty(AAX_eProperty_Constraint_Topology,
+                                AAX_eConstraintTopology_Monolithic);  // no separate UI and DSP
+  //
   //
   // Stem format -specific properties
   err = properties->AddProperty(AAX_eProperty_InputStemFormat, AAX_eStemFormat_Stereo);
@@ -145,14 +147,14 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor* outDesc,
 
   err = properties->AddProperty(AAX_eProperty_PlugInID_Native,
                                 AAXIDfromString(p.c_str()));  // cDemoGain_PlugInID_Native
-  err = properties->AddProperty(AAX_eProperty_Constraint_Location, AAX_eConstraintLocationMask_DataModel);
+  err =
+      properties->AddProperty(AAX_eProperty_Constraint_Location, AAX_eConstraintLocationMask_DataModel);
 
   //	err = properties->AddProperty ( AAX_eProperty_PlugInID_AudioSuite, cDemoGain_PlugInID_AudioSuite );	// for offline processing
   // 	err = properties->AddProperty ( AAX_eProperty_PlugInID_TI, cDemoGain_PlugInID_TI );
 
   // Register Native callback
   err = outDesc->AddProcessProc_Native(AAXWrapper_AlgorithmProcessFunction, properties);
-  
 
 #if 0
 	no TI in clap
@@ -191,8 +193,8 @@ static AAX_Result DescribeEffectFromClap(AAX_IEffectDescriptor* outDescriptor,
   err = outDescriptor->AddCategory(clapCategoriesToAAX(clapDescriptor->features));
 
   // Effect components
-  //   
-  // 
+  //
+  //
   //
   // Algorithm component
   {
@@ -206,7 +208,7 @@ static AAX_Result DescribeEffectFromClap(AAX_IEffectDescriptor* outDescriptor,
                                   kAAX_ProcPtrID_Create_EffectParameters);
 
   // GUI
-	err = outDescriptor->AddProcPtr( (void *) Wrapped_AAX_GUI_Create, kAAX_ProcPtrID_Create_EffectGUI );
+  err = outDescriptor->AddProcPtr((void*)Wrapped_AAX_GUI_Create, kAAX_ProcPtrID_Create_EffectGUI);
 
 #if 0
 	// Data model
@@ -237,26 +239,25 @@ static AAX_Result DescribeEffectFromClap(AAX_IEffectDescriptor* outDescriptor,
 #endif
   return err;
 }
-namespace cfg {
-  clap_audio_port_configuration_request mono_out[]{
-    { false ,0,1, CLAP_PORT_MONO, nullptr}
-  };
+namespace cfg
+{
+clap_audio_port_configuration_request mono_out[]{{false, 0, 1, CLAP_PORT_MONO, nullptr}};
 
-  const clap_audio_port_configuration_request mono_in_out[]{
-    { true,0,1,CLAP_PORT_MONO, nullptr},
-    { false,0,1,CLAP_PORT_MONO, nullptr},
-  };
+const clap_audio_port_configuration_request mono_in_out[]{
+    {true, 0, 1, CLAP_PORT_MONO, nullptr},
+    {false, 0, 1, CLAP_PORT_MONO, nullptr},
+};
 
-  const clap_audio_port_configuration_request stereo_out[]{
-        { false,0,2,CLAP_PORT_STEREO, nullptr},
-  };
+const clap_audio_port_configuration_request stereo_out[]{
+    {false, 0, 2, CLAP_PORT_STEREO, nullptr},
+};
 
-  const clap_audio_port_configuration_request stereo_in_out[]{
-        { true,0,2,CLAP_PORT_STEREO, nullptr},
-        { false,0,2,CLAP_PORT_STEREO, nullptr},
-        { false,1,2,CLAP_PORT_STEREO, nullptr},
-  };
-}
+const clap_audio_port_configuration_request stereo_in_out[]{
+    {true, 0, 2, CLAP_PORT_STEREO, nullptr},
+    {false, 0, 2, CLAP_PORT_STEREO, nullptr},
+    {false, 1, 2, CLAP_PORT_STEREO, nullptr},
+};
+}  // namespace cfg
 
 AAX_Result GetEffectDescriptions(AAX_ICollection* outCollection)
 {
@@ -281,49 +282,51 @@ AAX_Result GetEffectDescriptions(AAX_ICollection* outCollection)
 #if 1
       // why here? because we have factory and the clap-id
       static const clap_host_params_t micro_params = {
-        [](const clap_host_t* host, clap_param_rescan_flags flags) -> void {},
-        [](const clap_host_t* host, clap_id param_id, clap_param_clear_flags flags) -> void {},
-        [](const clap_host_t* host) -> void {}
-      };
+          [](const clap_host_t* host, clap_param_rescan_flags flags) -> void {},
+          [](const clap_host_t* host, clap_id param_id, clap_param_clear_flags flags) -> void {},
+          [](const clap_host_t* host) -> void {}};
 
       clap_host_t microhost = {
-        CLAP_VERSION,
-        nullptr,
-        "aax_scanner",
-        "clap",
-        "",
-        "1.0",
-        [](const struct clap_host* host, const char* extension_id) -> const void*
-        {
-          if (extension_id) os::log(extension_id);
-          if (!strcmp(CLAP_EXT_PARAMS, extension_id )) return &micro_params;
-          return nullptr;
-        },
-        [](const struct clap_host* host) -> void {},  // request_restart
-        [](const struct clap_host* host) -> void {},  // request_process
-        [](const struct clap_host* host) -> void {},  // request_callback
+          CLAP_VERSION,
+          nullptr,
+          "aax_scanner",
+          "clap",
+          "",
+          "1.0",
+          [](const struct clap_host* host, const char* extension_id) -> const void*
+          {
+            if (extension_id) os::log(extension_id);
+            if (!strcmp(CLAP_EXT_PARAMS, extension_id)) return &micro_params;
+            return nullptr;
+          },
+          [](const struct clap_host* host) -> void {},  // request_restart
+          [](const struct clap_host* host) -> void {},  // request_process
+          [](const struct clap_host* host) -> void {},  // request_callback
       };
-      try {
-        auto* tmpplug = factory->_pluginFactory->create_plugin(factory->_pluginFactory, &microhost, i->id);
+      try
+      {
+        auto* tmpplug =
+            factory->_pluginFactory->create_plugin(factory->_pluginFactory, &microhost, i->id);
         tmpplug->init(tmpplug);
-        auto k = (clap_plugin_configurable_audio_ports_t*)(tmpplug->get_extension(tmpplug, CLAP_EXT_CONFIGURABLE_AUDIO_PORTS));
+        auto k = (clap_plugin_configurable_audio_ports_t*)(tmpplug->get_extension(
+            tmpplug, CLAP_EXT_CONFIGURABLE_AUDIO_PORTS));
         if (k)
         {
           k->can_apply_configuration(tmpplug, cfg::stereo_in_out, 2);
         }
         tmpplug->destroy(tmpplug);
       }
-      catch (std::exception& e) {
+      catch (std::exception& e)
+      {
         os::log(e.what());
       }
 #endif
       if (effectDescriptor)
       {
-        AAX_SWALLOW_MULT(
-          err = DescribeEffectFromClap(effectDescriptor, i);
+        AAX_SWALLOW_MULT(err = DescribeEffectFromClap(effectDescriptor, i);
 
-        // using the clap-plugin id to get it back from the host controller
-        err = outCollection->AddEffect(i->id, effectDescriptor););
+                         // using the clap-plugin id to get it back from the host controller
+                         err = outCollection->AddEffect(i->id, effectDescriptor););
       }
     }
 
@@ -332,7 +335,6 @@ AAX_Result GetEffectDescriptions(AAX_ICollection* outCollection)
     outCollection->SetManufacturerName(plug->vendor);
     outCollection->AddPackageName(plug->name);
     outCollection->SetPackageVersion(1);
-
   }
   else
   {
@@ -357,7 +359,7 @@ AAX_Result ClapAsAAX::EffectInit()
   // the actual (AAX) plugin id is being retrieved
   _aax_ctrl = Controller();
   AAX_CString m;
-  _aax_ctrl->GetEffectID(&m);  
+  _aax_ctrl->GetEffectID(&m);
 
   os::log("AAX Effect Init for ");
   os::log(m.StdString().c_str());
@@ -437,11 +439,12 @@ AAX_Result ClapAsAAX::GetParameterNumberOfSteps(AAX_CParamID iParameterID, int32
     auto& info = n->second->_clap_param_info;
     if (info.flags & CLAP_PARAM_IS_STEPPED)
     {
-      *aNumSteps = info.max_value - info.min_value;
+      // the number of steps if min=0 and max=1 is 2
+      *aNumSteps = 1 + (info.max_value - info.min_value);
     }
     else
     {
-      *aNumSteps = 0;
+      *aNumSteps = 0;  // 0 means discrete/continuous, see class AAX_CParameter
     }
 
     return AAX_SUCCESS;
@@ -609,7 +612,6 @@ AAX_Result ClapAsAAX::SetChunk(AAX_CTypeID iChunkID, const AAX_SPlugInChunk* iCh
 
 void ClapAsAAX::setupWrapperSpecifics(const clap_plugin_t* plugin)
 {
-  
 }
 
 void ClapAsAAX::setupAudioBusses(const clap_plugin_t* plugin,

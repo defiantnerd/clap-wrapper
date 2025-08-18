@@ -2,7 +2,7 @@
 #include "util.h"
 #include "wrapper.h"
 
-#if 0 // don't use that clutter
+#if 0  // don't use that clutter
 #include "AAX_CBinaryTaperDelegate.h"
 #include "AAX_CLinearTaperDelegate.h"
 #include "AAX_CStateTaperDelegate.h"

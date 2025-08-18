@@ -51,12 +51,6 @@ Wrapped_AAX_GUI::~Wrapped_AAX_GUI()
   _clap = nullptr;
   _gui = nullptr;
   _plugin = nullptr;
-
-  //if (mViewComponent)
-  //{
-  //	mViewComponent->forget();
-  //	mViewComponent = NULL;
-  //}
 }
 
 void Wrapped_AAX_GUI::CreateViewContents()
@@ -66,15 +60,12 @@ void Wrapped_AAX_GUI::CreateViewContents()
 
 void Wrapped_AAX_GUI::CreateEffectView(void* inSystemWindow)
 {
-  // mViewComponent = new VSTGUI_ContentView(inSystemWindow, this->GetEffectParameters(), this);
-  // how do we get our plugin. the parameters have been set before
-  // and GetEffectParameters() retrieves a pointer to AAX_IEffectParameters
-  //
-  //
 #if WIN32
 #define CLAP_WINDOW_API CLAP_WINDOW_API_WIN32;
 #elif MAC
 #define CLAP_WINDOW_API CLAP_WINDOW_API_COCOA;
+#else
+#error I don't think we belong here
 #endif
   _platformwindow.api = CLAP_WINDOW_API;
   _platformwindow.ptr = inSystemWindow;
@@ -87,24 +78,21 @@ void Wrapped_AAX_GUI::CreateEffectView(void* inSystemWindow)
     _gui = _clap->_plugin->_ext._gui;
     _plugin = _clap->_plugin->_plugin;
 
-    if (_gui->create(_plugin, CLAP_WINDOW_API_WIN32, false))
+    if (_gui->create(_plugin, _platformwindow.api, false))
     {
       _created = true;
       _gui->set_parent(_plugin, &_platformwindow);
       _gui->set_scale(_plugin, 1.0);
-      //clap_gui_resize_hints_t t;
-      //_gui->get_resize_hints(_plugin, &t);
+      // Protools on Windows does not support hidpi today:
+      // https://kb.avid.com/pkb/articles/en_US/Knowledge/Pro-Tools-and-4K-Resolution-Monitors-on-Windows
     }
-  }
-  // if (mViewComponent)
-  {
-    // mViewComponent->setBackgroundColor(VSTGUI::kGreyCColor);
   }
 }
 
 void Wrapped_AAX_GUI::CreateViewContainer()
 {
-  if (this->GetViewContainerType() == AAX_eViewContainer_Type_HWND)
+  if (this->GetViewContainerType() == AAX_eViewContainer_Type_HWND ||
+      this->GetViewContainerType() == AAX_eViewContainer_Type_NSView)
   {
     this->CreateEffectView(this->GetViewContainerPtr());
   }
@@ -119,11 +107,6 @@ void Wrapped_AAX_GUI::DeleteViewContainer()
     _gui->destroy(_plugin);
     _created = false;
   }
-  //if (mViewComponent)
-  //{
-  //	mViewComponent->forget();
-  //	mViewComponent = NULL;
-  //}
 }
 
 AAX_Result Wrapped_AAX_GUI::GetViewSize(AAX_Point* oEffectViewSize) const
@@ -131,13 +114,14 @@ AAX_Result Wrapped_AAX_GUI::GetViewSize(AAX_Point* oEffectViewSize) const
   uint32_t w, h;
   if (_gui->get_size(_plugin, &w, &h))
   {
-    oEffectViewSize->horz = w;
-    oEffectViewSize->vert = h;
+    // AAX wants the size in float, which is really awkward
+    oEffectViewSize->horz = (float)w;
+    oEffectViewSize->vert = (float)h;
   }
   else
   {
-    oEffectViewSize->horz = 800;
-    oEffectViewSize->vert = 400;
+    oEffectViewSize->horz = 400;
+    oEffectViewSize->vert = 300;
   }
 
   return AAX_SUCCESS;

@@ -5,4 +5,4 @@
 
 AAX_IEffectGUI *AAX_CALLBACK Wrapped_AAX_GUI_Create(void);
 
-// class Wrapped_AAX_GUI is defined in the CPP file
+// the Wrapped_AAX_GUI class is defined in the CPP file
