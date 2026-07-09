@@ -68,7 +68,30 @@ current AUv3 feature status.
 ## Licensing
 
 The `clap-wrapper` project is released under the MIT license.
-Please note that using the `clap-wrapper` project to wrap
-a VST3 requires either (1) you use the VST3 SDK under the GPL3
-license, and as such are open source or (2) you agree to the
-VST3 license to generate the wrapper.
+The SDKs and libraries it references remain under their respective
+licenses:
+
+| SDK / Library | Used for | License |
+|---|---|---|
+| [CLAP SDK](https://github.com/free-audio/clap) | all wrappers | MIT |
+| [VST3 SDK](https://github.com/steinbergmedia/vst3sdk) (Steinberg) | VST3 wrapper | MIT (use of the VST trademark/logo per Steinberg's guidelines) |
+| [AudioUnitSDK](https://github.com/apple/AudioUnitSDK) (Apple) | AUv2 wrapper | Apache 2.0 |
+| AAX SDK (Avid) | AAX wrapper | GPL3 **or** commercial Avid AAX SDK License Agreement |
+| [RtAudio](https://github.com/thestk/rtaudio) | standalone audio I/O | MIT-like (RtAudio license) |
+| [RtMidi](https://github.com/thestk/rtmidi) | standalone MIDI I/O | MIT-like (RtMidi license) |
+| [WIL](https://github.com/microsoft/wil) (Microsoft) | standalone, Windows only | MIT |
+| [gulrak/filesystem](https://github.com/gulrak/filesystem) | std::filesystem fallback on older toolchains | MIT |
+| [{fmt}](https://github.com/fmtlib/fmt) (vendored in `libs/fmt`) | string formatting | MIT |
+| [PreSonus plugin extensions](https://github.com/fenderdigital/presonus-plugin-extension) (vendored in `libs/psl`) | gain-reduction extension in VST3 | Public domain |
+
+The AUv3 wrapper uses only Apple system frameworks (AudioToolbox,
+AVFoundation, CoreAudioKit) and needs no additional SDK.
+
+Please note that AAX is dual-licensed: the Avid AAX SDK is available
+either under the GPL3 or under the commercial
+[Avid AAX SDK License Agreement](https://developer.avid.com/aax). So
+to wrap an AAX plugin you must either release it under the GPL3 or
+agree to Avid's SDK license — and joining the Avid developer program
+is required in practice anyway, since AAX binaries must be signed
+with Avid/PACE tooling to load in commercial Pro Tools releases.
+
