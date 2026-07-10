@@ -50,7 +50,7 @@ function(make_clapfirst_plugins)
             AUV2_INSTRUMENT_TYPE
     )
     set(multiValueArgs
-            PLUGIN_FORMATS   # A list of plugin formats, "CLAP" "VST3" "AUV2"
+            PLUGIN_FORMATS   # A list of plugin formats, "CLAP" "VST3" "AUV2" "AAX"
             STANDALONE_CONFIGURATIONS # standalone configuration. This is a list of target names and clap ids
     )
     cmake_parse_arguments(C1ST "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN} )
@@ -76,7 +76,9 @@ function(make_clapfirst_plugins)
         if (ANY_WASM_TOOLCHAIN)
             set(C1ST_PLUGIN_FORMATS WCLAP)
         else()
-            set(C1ST_PLUGIN_FORMATS CLAP VST3 AUV2)
+            # AUV3 is not in the default list: the AUv3 appex can only be
+            # produced by the Xcode generator, so it is explicit opt-in.
+            set(C1ST_PLUGIN_FORMATS CLAP VST3 AUV2 AAX)
         endif()
     endif()
 
@@ -84,11 +86,15 @@ function(make_clapfirst_plugins)
         set(BUILD_CLAP -1)
         set(BUILD_VST3 -1)
         set(BUILD_AUV2 -1)
+        set(BUILD_AUV3 -1)
+        set(BUILD_AAX -1)
         list(FIND C1ST_PLUGIN_FORMATS "WCLAP" BUILD_WCLAP)
     else()
         list(FIND C1ST_PLUGIN_FORMATS "CLAP" BUILD_CLAP)
         list(FIND C1ST_PLUGIN_FORMATS "VST3" BUILD_VST3)
         list(FIND C1ST_PLUGIN_FORMATS "AUV2" BUILD_AUV2)
+        list(FIND C1ST_PLUGIN_FORMATS "AUV3" BUILD_AUV3)
+        list(FIND C1ST_PLUGIN_FORMATS "AAX" BUILD_AAX)
         set(BUILD_WCLAP -1)
 
         if (${BUILD_CLAP} EQUAL -1)
@@ -115,8 +121,8 @@ function(make_clapfirst_plugins)
     endif()
 
     if (NOT DEFINED C1ST_BUNDLE_VERSION)
-        message(STATUS "clap-wrapper: Defaulting clap first version to 0.01")
-        set(C1ST_BUNDLE_VERSION "0.01")
+        message(STATUS "clap-wrapper: Defaulting clap first version to ${PROJECT_VERSION}")
+        set(C1ST_BUNDLE_VERSION "${PROJECT_VERSION}")
     endif()
 
     set(ALL_TARGET ${C1ST_TARGET_NAME}_all)
@@ -164,7 +170,7 @@ function(make_clapfirst_plugins)
         endif()
         target_add_vst3_wrapper(TARGET ${VST3_TARGET}
                 OUTPUT_NAME "${C1ST_OUTPUT_NAME}"
-                BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFER}.vst3"
+                BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFIER}.vst3"
                 BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
                 ASSET_OUTPUT_DIRECTORY "${vod}"
                 WINDOWS_FOLDER_VST3 ${C1ST_WINDOWS_FOLDER_VST3}
@@ -184,7 +190,7 @@ function(make_clapfirst_plugins)
             target_add_auv2_wrapper(
                     TARGET ${AUV2_TARGET}
                     OUTPUT_NAME "${C1ST_OUTPUT_NAME}"
-                    BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFER}.auv2"
+                    BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFIER}.auv2"
                     BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
                     RESOURCE_DIRECTORY "${C1ST_RESOURCE_DIRECTORY}"
 
@@ -197,7 +203,7 @@ function(make_clapfirst_plugins)
             target_add_auv2_wrapper(
                     TARGET ${AUV2_TARGET}
                     OUTPUT_NAME "${C1ST_OUTPUT_NAME}"
-                    BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFER}.auv2"
+                    BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFIER}.auv2"
                     BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
                     RESOURCE_DIRECTORY "${C1ST_RESOURCE_DIRECTORY}"
 
@@ -211,6 +217,108 @@ function(make_clapfirst_plugins)
         endif()
 
         add_dependencies(${ALL_TARGET} ${AUV2_TARGET})
+    endif()
+
+    if (APPLE AND ${BUILD_AUV3} GREATER -1)
+        message(STATUS "clap-wrapper: ClapFirst is making an AUv3")
+        set(AUV3_TARGET ${C1ST_TARGET_NAME}_auv3)
+        add_executable(${AUV3_TARGET})
+        target_sources(${AUV3_TARGET} PRIVATE ${C1ST_ENTRY_SOURCE})
+        target_link_libraries(${AUV3_TARGET} PRIVATE ${C1ST_IMPL_TARGET})
+        # The clap entry is statically linked into the appex via ENTRY_SOURCE,
+        # so wire the wrapper directly to that symbol instead of relying on
+        # CFBundle-based self-resolution of an MH_EXECUTE binary at runtime.
+        target_compile_definitions(${AUV3_TARGET} PRIVATE STATICALLY_LINKED_CLAP_ENTRY=1)
+        if (DEFINED C1ST_AUV2_MANUFACTURER_CODE)
+            target_add_auv3_wrapper(
+                    TARGET ${AUV3_TARGET}
+                    OUTPUT_NAME "${C1ST_OUTPUT_NAME}"
+                    BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFIER}.auv3"
+                    BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
+                    RESOURCE_DIRECTORY "${C1ST_RESOURCE_DIRECTORY}"
+
+                    MANUFACTURER_NAME "${C1ST_AUV2_MANUFACTURER_NAME}"
+                    MANUFACTURER_CODE "${C1ST_AUV2_MANUFACTURER_CODE}"
+                    SUBTYPE_CODE "${C1ST_AUV2_SUBTYPE_CODE}"
+                    INSTRUMENT_TYPE "${C1ST_AUV2_INSTRUMENT_TYPE}"
+            )
+        else()
+            target_add_auv3_wrapper(
+                    TARGET ${AUV3_TARGET}
+                    OUTPUT_NAME "${C1ST_OUTPUT_NAME}"
+                    BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFIER}.auv3"
+                    BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
+                    RESOURCE_DIRECTORY "${C1ST_RESOURCE_DIRECTORY}"
+
+                    CLAP_TARGET_FOR_CONFIG "${CLAP_TARGET}"
+            )
+        endif()
+
+        if (DEFINED C1ST_ASSET_OUTPUT_DIRECTORY)
+            # The appex is an add_executable bundle — executables honor
+            # RUNTIME_OUTPUT_DIRECTORY (LIBRARY_OUTPUT_DIRECTORY is ignored
+            # and the .appex would miss the assets directory).
+            set_target_properties(${AUV3_TARGET} PROPERTIES
+                    RUNTIME_OUTPUT_DIRECTORY ${C1ST_ASSET_OUTPUT_DIRECTORY})
+        endif()
+
+        add_dependencies(${ALL_TARGET} ${AUV3_TARGET})
+
+        # AUv3 Standalone host app (embeds the .appex). macOS only:
+        # target_add_auv3_standalone_wrapper is the AppKit host — on iOS the
+        # separate target_add_auv3_standalone_ios_wrapper applies, which a
+        # consuming project wires up itself (it involves signing decisions).
+        if (DEFINED C1ST_AUV2_MANUFACTURER_CODE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set(AUV3SA_TARGET ${C1ST_TARGET_NAME}_auv3_standalone)
+            message(STATUS "clap-wrapper: ClapFirst is making an AUv3 Standalone")
+            add_executable(${AUV3SA_TARGET})
+            target_add_auv3_standalone_wrapper(
+                    TARGET ${AUV3SA_TARGET}
+                    OUTPUT_NAME "${C1ST_OUTPUT_NAME} AUv3"
+                    BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFIER}.auv3standalone"
+                    BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
+                    AUV3_TARGET ${AUV3_TARGET}
+                    AU_TYPE "${C1ST_AUV2_INSTRUMENT_TYPE}"
+                    AU_SUBTYPE "${C1ST_AUV2_SUBTYPE_CODE}"
+                    AU_MANUFACTURER "${C1ST_AUV2_MANUFACTURER_CODE}"
+                    MACOS_ICON "${C1ST_STANDALONE_MACOS_ICON}"
+            )
+
+            if (DEFINED C1ST_ASSET_OUTPUT_DIRECTORY)
+                set_target_properties(${AUV3SA_TARGET} PROPERTIES
+                        RUNTIME_OUTPUT_DIRECTORY ${C1ST_ASSET_OUTPUT_DIRECTORY})
+            endif()
+
+            add_dependencies(${ALL_TARGET} ${AUV3SA_TARGET})
+        endif()
+    endif()
+
+    ## ----------------------
+     if (CLAP_WRAPPER_CAN_BUILD_AAX AND ${BUILD_AAX} GREATER -1)
+        message(STATUS "clap-wrapper: ClapFirst is making an AAX")
+
+        set(AAX_TARGET ${C1ST_TARGET_NAME}_aax)
+        add_library(${AAX_TARGET} MODULE)
+        target_sources(${AAX_TARGET} PRIVATE ${C1ST_ENTRY_SOURCE})
+        target_link_libraries(${AAX_TARGET} PRIVATE ${C1ST_IMPL_TARGET})
+        set(vod "")
+        if (DEFINED C1ST_ASSET_OUTPUT_DIRECTORY)
+            if (NOT WIN32)
+                set(vod "${C1ST_ASSET_OUTPUT_DIRECTORY}")
+            else ()
+                set(vod "${C1ST_ASSET_OUTPUT_DIRECTORY}/AAX")
+            endif()
+        endif()
+        target_add_aax_wrapper(TARGET ${AAX_TARGET}
+                OUTPUT_NAME "${C1ST_OUTPUT_NAME}"
+                BUNDLE_IDENTIFIER "${C1ST_BUNDLE_IDENTIFIER}.aaxplugin"
+                BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
+                ASSET_OUTPUT_DIRECTORY "${vod}"
+                
+                RESOURCE_DIRECTORY "${C1ST_RESOURCE_DIRECTORY}"
+        )
+
+        add_dependencies(${ALL_TARGET} ${AAX_TARGET})
     endif()
 
     if (${BUILD_WCLAP} GREATER -1)
@@ -274,6 +382,7 @@ function(make_clapfirst_plugins)
                         MACOS_ICON "${C1ST_STANDALONE_MACOS_ICON}"
                         WINDOWS_ICON "${C1ST_STANDALONE_WINDOWS_ICON}"
                         RESOURCE_DIRECTORY "${C1ST_RESOURCE_DIRECTORY}"
+                        BUNDLE_VERSION "${C1ST_BUNDLE_VERSION}"
                 )
                 if (DEFINED C1ST_ASSET_OUTPUT_DIRECTORY)
                     if (NOT WIN32)

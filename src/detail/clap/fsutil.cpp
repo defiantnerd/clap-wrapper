@@ -229,11 +229,34 @@ bool Library::load(const fs::path &path)
 #endif
 }
 
+// getting the information for a VST3 plugin at given index
 const clap_plugin_info_as_vst3_t *Library::get_vst3_info(uint32_t index) const
 {
   if (_pluginFactoryVst3Info && _pluginFactoryVst3Info->get_vst3_info)
   {
     return _pluginFactoryVst3Info->get_vst3_info(_pluginFactoryVst3Info, index);
+  }
+  return nullptr;
+}
+
+// getting the compatibility information for the VST3 IPluginCompatibility interface
+const char *Library::get_vst3_compatibility() const
+{
+  // get_vst3_compatibility is only part of the factory struct since version 1
+  if (_pluginFactoryVst3Info && _pluginFactoryVst3InfoIsV1 &&
+      _pluginFactoryVst3Info->get_vst3_compatibility)
+  {
+    return _pluginFactoryVst3Info->get_vst3_compatibility(_pluginFactoryVst3Info);
+  }
+  return nullptr;
+}
+
+// getting the information for a AAX plugin at given index
+const clap_plugin_info_as_aax_t *Library::get_aax_info(uint32_t index) const
+{
+  if (_pluginFactoryAAXInfo && _pluginFactoryAAXInfo->get_aax_info)
+  {
+    return _pluginFactoryAAXInfo->get_aax_info(_pluginFactoryAAXInfo, index);
   }
   return nullptr;
 }
@@ -253,6 +276,21 @@ bool Library::getEntryFunction(HMODULE handle, const char *path)
 }
 #endif
 
+void Library::useStaticEntry(const clap_plugin_entry_t *entry, const char *path)
+{
+  if (!entry) return;
+  // This is called against a process-wide Library on every plugin
+  // instantiation (and the constructor may already have wired the same
+  // entry under STATICALLY_LINKED_CLAP_ENTRY). clap_entry->init() must only
+  // run once per deinit and the descriptor list must not accumulate
+  // duplicates, so a repeated call with an already-initialized entry is a
+  // no-op. _pluginFactory is only set after a successful init.
+  if (_pluginEntry == entry && _pluginFactory) return;
+  _pluginEntry = entry;
+  _selfcontained = true;
+  setupPluginsFromPluginEntry(path ? path : "");
+}
+
 void Library::setupPluginsFromPluginEntry(const char *path)
 {
   if (clap_version_is_compatible(_pluginEntry->clap_version))
@@ -261,10 +299,19 @@ void Library::setupPluginsFromPluginEntry(const char *path)
     {
       _pluginFactory =
           static_cast<const clap_plugin_factory *>(_pluginEntry->get_factory(CLAP_PLUGIN_FACTORY_ID));
-      _pluginFactoryVst3Info = static_cast<const clap_plugin_factory_as_vst3 *>(
-          _pluginEntry->get_factory(CLAP_PLUGIN_FACTORY_INFO_VST3));
-      _pluginFactoryAUv2Info = static_cast<const clap_plugin_factory_as_auv2 *>(
+      // prefer the newer version of the vst3 factory info, fall back to version 0
+      _pluginFactoryVst3Info = static_cast<decltype(_pluginFactoryVst3Info)>(
+          _pluginEntry->get_factory(CLAP_PLUGIN_FACTORY_INFO_VST3_V1));
+      _pluginFactoryVst3InfoIsV1 = (_pluginFactoryVst3Info != nullptr);
+      if (!_pluginFactoryVst3Info)
+      {
+        _pluginFactoryVst3Info = static_cast<decltype(_pluginFactoryVst3Info)>(
+            _pluginEntry->get_factory(CLAP_PLUGIN_FACTORY_INFO_VST3));
+      }
+      _pluginFactoryAUv2Info = static_cast<decltype(_pluginFactoryAUv2Info)>(
           _pluginEntry->get_factory(CLAP_PLUGIN_FACTORY_INFO_AUV2));
+      _pluginFactoryAAXInfo = static_cast<decltype(_pluginFactoryAAXInfo)>(
+          _pluginEntry->get_factory(CLAP_PLUGIN_FACTORY_INFO_AAX));
       _pluginFactoryARAInfo =
           static_cast<const clap_ara_factory_t *>(_pluginEntry->get_factory(CLAP_EXT_ARA_FACTORY));
 
@@ -273,6 +320,7 @@ void Library::setupPluginsFromPluginEntry(const char *path)
       {
         // in this case, don't trust anything from there
         _pluginFactoryVst3Info = nullptr;
+        _pluginFactoryVst3InfoIsV1 = false;
         _pluginFactoryAUv2Info = nullptr;
         _pluginFactoryARAInfo = nullptr;
       }

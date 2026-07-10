@@ -6,11 +6,58 @@ function (guarantee_cpm)
     endif()
 endfunction(guarantee_cpm)
 
+# this is a check if a platform can properly build AAX at all.
+# So this is either MacOS or Windows, but only with MSVC
+function(can_build_aax result)
+
+    set(${result} FALSE PARENT_SCOPE)
+
+    if (APPLE)
+        set(${result} TRUE PARENT_SCOPE)
+        return()
+    endif()
+
+    if (WIN32 AND NOT MINGW)
+        string(TOUPPER "${CMAKE_SYSTEM_PROCESSOR}" _processor)
+        string(TOUPPER "${CMAKE_GENERATOR_PLATFORM}" _platform)
+
+        # Exclude Windows ARM
+        if (_processor MATCHES "^(ARM|ARM64|AARCH64)$")
+            return()
+        endif()
+        if (_platform MATCHES "^(ARM|ARM64|AARCH64)$")
+            return()
+        endif()
+        # Exclude ClangCL
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+            message("STATUS: clap-wrapper: ignoring Windows Clang")
+            return()
+        endif()
+        # Exclude plain Clang on Windows
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            message("STATUS: clap-wrapper: ignoring Windows Clang")
+            return()
+        endif()
+        # Exclude GCC on Windows (non-MinGW GCC edge case)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            message("STATUS: clap-wrapper: ignoring Windows GCC")
+            return()
+        endif()
+
+        set(${result} TRUE PARENT_SCOPE)
+    endif()
+endfunction(can_build_aax)
+
+can_build_aax(CLAP_WRAPPER_CAN_BUILD_AAX)
+if (NOT PROJECT_IS_TOP_LEVEL)
+    set(CLAP_WRAPPER_CAN_BUILD_AAX TRUE PARENT_SCOPE)
+endif()
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(EMSCRIPTEN 1)
 endif()
 
-if (EMSCRIPTEN OR (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "wasm32") OR (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "wasm64"))
+if (EMSCRIPTEN OR ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "wasm32") OR ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "wasm64"))
     set(ANY_WASM_TOOLCHAIN 1 PARENT_SCOPE)
 endif()
 
@@ -125,6 +172,10 @@ function(target_copy_after_build)
         set(postfix "component")
         set(macdir "Components")
         set(lindir ".component")
+    elseif (${CAB_FLAVOR} STREQUAL "auv3")
+        set(postfix "appex")
+        set(macdir "Components")
+        set(lindir ".appex")
     elseif (${CAB_FLAVOR} STREQUAL "clap")
         set(postfix "clap")
         set(macdir "CLAP")
@@ -175,6 +226,8 @@ function(guarantee_clap_wrapper_shared)
             src/clap_proxy.cpp
             src/detail/shared/sha1.h
             src/detail/shared/sha1.cpp
+            src/detail/shared/util.h
+            src/detail/shared/util.cpp
             src/detail/clap/fsutil.h
             src/detail/clap/fsutil.cpp
             src/detail/clap/automation.h
@@ -267,3 +320,4 @@ if(${CMAKE_SIZEOF_VOID_P} EQUAL 4)
     message(STATUS "clap-wrapper: configured as 32 bit build. Intentional?")
 endif()
 message(STATUS "clap-wrapper: source dir is ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}, platform is ${CLAP_WRAPPER_PLATFORM}")
+

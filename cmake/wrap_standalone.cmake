@@ -1,5 +1,4 @@
 
-option(CLAP_WRAPPER_LINUX_STANDALONE_USES_GTK "Linux uses GTC vs simple X11" FALSE)
 function(target_add_standalone_wrapper)
     set(oneValueArgs
             TARGET
@@ -52,6 +51,11 @@ function(target_add_standalone_wrapper)
         set(SA_RESOURCE_DIRECTORY "")
     endif()
 
+    if (NOT DEFINED SA_BUNDLE_VERSION)
+        message(STATUS "No SA_BUNDLE_VERSION - using ${PROJECT_VERSION}")
+        set(SA_BUNDLE_VERSION "${PROJECT_VERSION}")
+    endif()
+
     guarantee_rtaudio()
     guarantee_rtmidi()
 
@@ -89,12 +93,16 @@ function(target_add_standalone_wrapper)
                 ${GEN_XIB}
                 )
 
+
         set_target_properties(${SA_TARGET} PROPERTIES
                 BUNDLE TRUE
                 BUNDLE_NAME ${SA_OUTPUT_NAME}
                 BUNDLE_EXTENSION app
                 OUTPUT_NAME ${SA_OUTPUT_NAME}
                 MACOSX_BUNDLE_BUNDLE_NAME ${SA_OUTPUT_NAME}
+                MACOSX_BUNDLE_SHORT_VERSION_STRING ${SA_BUNDLE_VERSION}
+                MACOSX_BUNDLE_LONG_VERSION_STRING ${SA_BUNDLE_VERSION}
+                MACOSX_BUNDLE_BUNDLE_VERSION ${SA_BUNDLE_VERSION}
                 MACOSX_BUNDLE TRUE
                 MACOSX_BUNDLE_INFO_PLIST ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/macos/Info.plist.in
                 RESOURCE "${GEN_XIB}"
@@ -156,27 +164,10 @@ function(target_add_standalone_wrapper)
         target_sources(${SA_TARGET} PRIVATE
                 ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/wrapasstandalone.cpp)
 
-        set(TRY_GTK False)
-        if (${CLAP_WRAPPER_LINUX_STANDALONE_USES_GTK})
-            message(STATUS "clap-wrapper: Attempting to find gtkmm-3")
-            find_package(PkgConfig REQUIRED)
-            pkg_check_modules(GTK gtkmm-3.0)
-            set(TRY_GTK ${GTK_FOUND})
-        endif()
-
-        if (${TRY_GTK})
-            message(STATUS "clap-wrapper: using gtkmm-3.0 for standalone")
-            target_compile_options(${salib} PUBLIC ${GTK_CFLAGS})
-            target_include_directories(${salib} PUBLIC ${GTK_INCLUDE_DIRS})
-            target_link_libraries(${salib} PUBLIC ${GTK_LINK_LIBRARIES})
-            target_compile_definitions(${salib} PUBLIC CLAP_WRAPPER_HAS_GTK3)
-            target_sources(${salib} PRIVATE ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/linux/gtkutils.cpp)
-        else()
-            message(STATUS "clap-wrapper: Using Standalone X11 gui for CLAP Wrapper")
-            target_link_libraries(${salib} PUBLIC X11)
-            target_compile_definitions(${salib} PUBLIC CLAP_WRAPPER_STANDALONE_X11)
-            target_sources(${salib} PRIVATE ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/linux/x11_gui.cpp)
-        endif()
+        message(STATUS "clap-wrapper: Using Standalone X11 gui for CLAP Wrapper")
+        target_link_libraries(${salib} PUBLIC X11)
+        target_compile_definitions(${salib} PUBLIC CLAP_WRAPPER_STANDALONE_X11)
+        target_sources(${salib} PRIVATE ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/linux/x11_gui.cpp)
 
         set_target_properties(${SA_TARGET} PROPERTIES OUTPUT_NAME ${SA_OUTPUT_NAME})
 

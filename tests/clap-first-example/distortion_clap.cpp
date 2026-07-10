@@ -13,6 +13,7 @@
 #include <clap/clap.h>
 #include <math.h>
 #include <assert.h>
+#include "clapwrapper/vst3.h"
 #include "distortion_clap_entry.h"
 
 static const char *features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_STEREO,
@@ -54,6 +55,8 @@ typedef struct
   float drive;
   float mix;
   int32_t mode;
+
+  uint32_t channels;
 } clap1st_distortion_plug;
 
 static void clap1stDist_process_event(clap1st_distortion_plug *plug, const clap_event_header_t *hdr);
@@ -82,9 +85,40 @@ static const clap_plugin_track_info_t s_clap1stDist_track_info = {
     clap1stDist_track_info_changed,
 };
 
-/////////////////////////////
-// clap_plugin_audio_ports //
-/////////////////////////////
+///////////////////////////////////
+// clap_configurable_audio_ports //
+///////////////////////////////////
+
+static bool clap1stDist_can_apply_configuration(
+    const clap_plugin_t *plugin, const struct clap_audio_port_configuration_request *requests,
+    uint32_t request_count)
+{
+  if (request_count != 2) return false;  // one request for input, one for output
+  if (requests[0].is_input == requests[1].is_input) return false;
+  if (requests[0].port_index != 0 || requests[1].port_index != 0) return false;
+  if (requests[0].channel_count != requests[1].channel_count) return false;
+
+  return true;
+}
+
+static bool clap1stDist_apply_configuration(const clap_plugin_t *plugin,
+                                            const struct clap_audio_port_configuration_request *requests,
+                                            uint32_t request_count)
+{
+  if (!clap1stDist_can_apply_configuration(plugin, requests, request_count)) return false;
+  auto *plug = (clap1st_distortion_plug *)plugin->plugin_data;
+  plug->channels = requests[0].channel_count;
+  return true;
+}
+
+static clap_plugin_configurable_audio_ports_t s_clap1stDist_configurable_audio_ports = {
+    clap1stDist_can_apply_configuration,
+    clap1stDist_apply_configuration,
+};
+
+//////////////////////
+// clap_audio_ports //
+//////////////////////
 
 static uint32_t clap1stDist_audio_ports_count(const clap_plugin_t *plugin, bool is_input)
 {
@@ -95,16 +129,18 @@ static uint32_t clap1stDist_audio_ports_count(const clap_plugin_t *plugin, bool 
 static bool clap1stDist_audio_ports_get(const clap_plugin_t *plugin, uint32_t index, bool is_input,
                                         clap_audio_port_info_t *info)
 {
+  auto *plug = (clap1st_distortion_plug *)plugin->plugin_data;
+
   if (index > 0) return false;
   info->id = 0;
   if (is_input)
     snprintf(info->name, sizeof(info->name), "%s", "Stereo In");
   else
     snprintf(info->name, sizeof(info->name), "%s", "Distorted Output");
-  info->channel_count = 2;
   info->flags = CLAP_AUDIO_PORT_IS_MAIN;
-  info->port_type = CLAP_PORT_STEREO;
   info->in_place_pair = CLAP_INVALID_ID;
+  info->channel_count = plug->channels;
+  info->port_type = nullptr;
   return true;
 }
 
@@ -113,9 +149,9 @@ static const clap_plugin_audio_ports_t s_clap1stDist_audio_ports = {
     clap1stDist_audio_ports_get,
 };
 
-//////////////////
-// clap_porams //
-//////////////////
+/////////////////
+// clap_params //
+/////////////////
 
 uint32_t clap1stDist_param_count(const clap_plugin_t *plugin)
 {
@@ -321,6 +357,7 @@ static bool clap1stDist_init(const struct clap_plugin *plugin)
 
   // Fetch host's extensions here
   plug->hostLog = (const clap_host_log_t *)plug->host->get_extension(plug->host, CLAP_EXT_LOG);
+  plug->channels = 2;  // default to stereo
 
   plug->drive = 0.f;
   plug->mix = 0.5f;
@@ -424,53 +461,45 @@ static clap_process_status clap1stDist_process(const struct clap_plugin *plugin,
       }
     }
 
+    assert(process->audio_inputs[0].channel_count == process->audio_outputs[0].channel_count);
+    assert(process->audio_inputs[0].channel_count == plug->channels);
+
     /* process every samples until the next event */
-    for (; i < next_ev_frame; ++i)
+    for (int j = 0; j < process->audio_inputs[0].channel_count; ++j)
     {
-      // fetch input samples
-      const float in_l = process->audio_inputs[0].data32[0][i];
-      const float in_r = process->audio_inputs[0].data32[1][i];
-
-      float out_l, out_r;
-      out_l = 0;
-      out_r = 0;
-
-      float tl = in_l * (1.0 + plug->drive);
-      float tr = in_r * (1.0 + plug->drive);
-
-      // Obviously this is inefficient but
-      switch (plug->mode)
+      for (; i < next_ev_frame; ++i)
       {
-        case HARD:
-        {
-          tl = (tl > 1 ? 1 : tl < -1 ? -1 : tl);
-          tr = (tr > 1 ? 1 : tr < -1 ? -1 : tr);
-        }
-        break;
-        case SOFT:
-        {
-          tl = (tl > 1 ? 1 : tl < -1 ? -1 : tl);
-          tl = 1.5 * tl - 0.5 * tl * tl * tl;
+        // fetch input samples
+        const float in = process->audio_inputs[0].data32[j][i];
+        float tl = in * (1.0 + plug->drive);
 
-          tr = (tr > 1 ? 1 : tr < -1 ? -1 : tr);
-          tr = 1.5 * tr - 0.5 * tr * tr * tr;
-        }
-        break;
-        case FOLD:
+        // Obviously this is inefficient but
+        switch (plug->mode)
         {
-          tl = sin(2.0 * 3.14159265 * tl);
-          tr = sin(2.0 * 3.14159265 * tr);
+          case HARD:
+          {
+            tl = (tl > 1 ? 1 : tl < -1 ? -1 : tl);
+          }
+          break;
+          case SOFT:
+          {
+            tl = (tl > 1 ? 1 : tl < -1 ? -1 : tl);
+            tl = 1.5 * tl - 0.5 * tl * tl * tl;
+          }
+          break;
+          case FOLD:
+          {
+            tl = sin(2.0 * 3.14159265 * tl);
+          }
+          break;
         }
-        break;
+
+        float mix = plug->mix;
+        float out = mix * tl + (1.0 - mix) * in;
+
+        // store output samples
+        process->audio_outputs[0].data32[j][i] = out;
       }
-
-      float mix = plug->mix;
-      out_l = mix * tl + (1.0 - mix) * in_l;
-      out_r = mix * tr + (1.0 - mix) * in_r;
-
-      // store output samples
-      process->audio_outputs[0].data32[0][i] = out_l;
-      process->audio_outputs[0].data32[1][i] = out_r;
     }
   }
 
@@ -480,6 +509,7 @@ static clap_process_status clap1stDist_process(const struct clap_plugin *plugin,
 static const void *clap1stDist_get_extension(const struct clap_plugin *plugin, const char *id)
 {
   if (!strcmp(id, CLAP_EXT_TRACK_INFO)) return &s_clap1stDist_track_info;
+  if (!strcmp(id, CLAP_EXT_CONFIGURABLE_AUDIO_PORTS)) return &s_clap1stDist_configurable_audio_ports;
   if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &s_clap1stDist_audio_ports;
   if (!strcmp(id, CLAP_EXT_PARAMS)) return &s_clap1stDist_params;
   if (!strcmp(id, CLAP_EXT_STATE)) return &s_clap1stDist_state;
@@ -546,6 +576,34 @@ static const clap_plugin_factory_t s_plugin_factory = {
     plugin_factory_create_plugin,
 };
 
+///////////////////////////////////////
+// clap_plugin_factory_as_vst3 (v1)  //
+///////////////////////////////////////
+
+const char *plugin_factory_get_vst3_compatibility(const clap_plugin_factory_as_vst3 *factory)
+{
+  // the compatibility information for the VST3 IPluginCompatibility interface, a JSON5
+  // array declaring which old VST3 class ids are being replaced by this plugin.
+  // the "Old" entries here are just examples - in a real plugin, they would be the class
+  // ids of the previously released VST3 this plugin replaces.
+  return R"([
+  {
+    "New": "90DB239B463453DA9FD24049D0D8410A",
+    "Old": [
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", // just an example
+    ],
+  },
+])";
+}
+
+static const clap_plugin_factory_as_vst3_t s_plugin_factory_as_vst3 = {
+    nullptr,  // vendor
+    nullptr,  // vendor_url
+    nullptr,  // email_contact
+    nullptr,  // get_vst3_info
+    plugin_factory_get_vst3_compatibility,
+};
+
 bool dist_entry_init(const char *plugin_path)
 {
   // called only once, and very first
@@ -560,5 +618,9 @@ void dist_entry_deinit(void)
 const void *dist_entry_get_factory(const char *factory_id)
 {
   if (!strcmp(factory_id, CLAP_PLUGIN_FACTORY_ID)) return &s_plugin_factory;
+  // the same struct is returned for both versions of the vst3 factory info; the
+  // wrapper only reads get_vst3_compatibility when it asked for the /1 version
+  if (!strcmp(factory_id, CLAP_PLUGIN_FACTORY_INFO_VST3)) return &s_plugin_factory_as_vst3;
+  if (!strcmp(factory_id, CLAP_PLUGIN_FACTORY_INFO_VST3_V1)) return &s_plugin_factory_as_vst3;
   return nullptr;
 }

@@ -100,6 +100,10 @@ function(target_add_vst3_wrapper)
 
         target_link_libraries(${V3_TARGET}-clap-wrapper-vst3-lib PUBLIC clap base-sdk-vst3)
 
+        if(NOT WIN32)
+          target_compile_options(${V3_TARGET}-clap-wrapper-vst3-lib PRIVATE -Wno-pragma-pack)
+        endif()
+
         # clap-wrapper-extensions are PUBLIC, so a clap linking the library can access the clap-wrapper-extensions
         target_link_libraries(${V3_TARGET}-clap-wrapper-vst3-lib PUBLIC
                 clap-wrapper-compile-options-public
