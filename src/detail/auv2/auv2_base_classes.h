@@ -520,9 +520,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   void deactivateCLAP();
   bool IsBypassEffect()
   {
-    return false;
+    return _isBypassed;
   }
-  void SetBypassEffect(bool bypass) {};
+  void SetBypassEffect(bool bypass);
 
   // --------------- internals
 
@@ -553,6 +553,10 @@ class WrapAsAUV2 : public ausdk::AUBase,
   std::vector<AudioUnitParameterID> _orderedParameterList;
   bool _paramOrderingProvided{false};
   Clumps _clumps;
+
+  // the CLAP parameter flagged CLAP_PARAM_IS_BYPASS, driven by kAudioUnitProperty_BypassEffect
+  clap_id _bypassParamID = CLAP_INVALID_ID;
+  bool _isBypassed = false;
 
   CFStringRef _current_program_name = 0;
 

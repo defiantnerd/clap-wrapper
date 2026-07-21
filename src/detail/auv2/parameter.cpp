@@ -33,12 +33,15 @@ void Parameter::updateInfo(const clap_plugin_t *plugin, const clap_plugin_params
     else
       flags |= kAudioUnitParameterFlag_IsReadable | kAudioUnitParameterFlag_IsWritable;
   }
+  // the unit is a value, not a bitfield, and must not be mixed into the flags
+  _unit = kAudioUnitParameterUnit_Generic;
   if (info.flags & CLAP_PARAM_IS_STEPPED)
   {
-    if (info.max_value == 1 && info.min_value == 0)
-      flags |= kAudioUnitParameterUnit_Boolean;
+    // an enum always has named values, so report it as Indexed even for a two-value range
+    if (info.max_value == 1 && info.min_value == 0 && !(info.flags & CLAP_PARAM_IS_ENUM))
+      _unit = kAudioUnitParameterUnit_Boolean;
     else
-      flags |= kAudioUnitParameterUnit_Indexed;
+      _unit = kAudioUnitParameterUnit_Indexed;
   }
 
   // we need this, otherwise hosts may quantize the parameter to 100 steps

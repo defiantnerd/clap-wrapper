@@ -351,6 +351,7 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
   _clumps.reset();
   _orderedParameterList.clear();
   _paramOrderingProvided = false;
+  _bypassParamID = CLAP_INVALID_ID;
   auto *p = _plugin->_ext._params;
   if (p)
   {
@@ -426,6 +427,11 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
           else
           {
             piter->second->updateInfo(_plugin->_plugin, p, paraminfo);
+          }
+          if (paraminfo.flags & CLAP_PARAM_IS_BYPASS)
+          {
+            _bypassParamID = paraminfo.id;
+            _isBypassed = (result >= 0.5 * (paraminfo.min_value + paraminfo.max_value));
           }
           Globals()->SetParameter(paraminfo.id, result);
           _orderedParameterList.push_back(static_cast<AudioUnitParameterID>(paraminfo.id));
@@ -517,6 +523,7 @@ OSStatus WrapAsAUV2::GetParameterInfo(AudioUnitScope inScope, AudioUnitParameter
       const auto &info = f->info();
 
       outParameterInfo.flags = f->AudioUnitFlags();
+      outParameterInfo.unit = f->AudioUnitUnit();
 
       // according to the documentation, the name field should be zeroed. In fact, AULab does display anything then.
       // strcpy(outParameterInfo.name, info.name);
@@ -559,6 +566,21 @@ OSStatus WrapAsAUV2::SetParameter(AudioUnitParameterID inID, AudioUnitScope inSc
     }
   }
   return AUBase::SetParameter(inID, inScope, inElement, inValue, inBufferOffsetInFrames);
+}
+
+void WrapAsAUV2::SetBypassEffect(bool bypass)
+{
+  _isBypassed = bypass;
+  if (_bypassParamID != CLAP_INVALID_ID)
+  {
+    auto p = _parametertree.find(_bypassParamID);
+    if (p != _parametertree.end())
+    {
+      const auto &info = p->second->info();
+      SetParameter(_bypassParamID, kAudioUnitScope_Global, 0, bypass ? info.max_value : info.min_value,
+                   0);
+    }
+  }
 }
 
 OSStatus WrapAsAUV2::CopyClumpName(AudioUnitScope inScope, UInt32 inClumpID, UInt32 inDesiredNameLength,
@@ -1172,6 +1194,20 @@ void WrapAsAUV2::onIdle()
       case queueEvent::type::editvalue:
       {
         Globals()->SetParameter(e._data._id, e._data._value.value);
+        if (e._data._id == _bypassParamID)
+        {
+          auto p = _parametertree.find(_bypassParamID);
+          if (p != _parametertree.end())
+          {
+            const auto &info = p->second->info();
+            const bool bypassed = (e._data._value.value >= 0.5 * (info.min_value + info.max_value));
+            if (bypassed != _isBypassed)
+            {
+              _isBypassed = bypassed;
+              PropertyChanged(kAudioUnitProperty_BypassEffect, kAudioUnitScope_Global, 0);
+            }
+          }
+        }
         AudioUnitEvent myEvent;
         myEvent.mEventType = kAudioUnitEvent_ParameterValueChange;
         myEvent.mArgument.mParameter.mAudioUnit = GetComponentInstance();
