@@ -161,6 +161,7 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor *outDesc,
   // Register MIDI nodes. To avoid context corruption, register small blocks of private data for fields where a node is not needed
   AAX_CFieldIndex globalNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mGlobalNode);
   AAX_CFieldIndex localInputNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mInputNode);
+  AAX_CFieldIndex localOutputNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mOutputNode);
   AAX_CFieldIndex transportNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mTransportNode);
 
   // Global MIDI node — not currently used
@@ -186,11 +187,16 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor *outDesc,
   if (businfo.has_midi_out)
   {
     if (aax_plugin_info && aax_plugin_info->midi_out_name)
-      err = outDesc->AddMIDINode(localInputNodeID, AAX_eMIDINodeType_LocalOutput,
+      err = outDesc->AddMIDINode(localOutputNodeID, AAX_eMIDINodeType_LocalOutput,
                                  aax_plugin_info->midi_out_name, aax_plugin_info->midi_out_channel_mask);
     else
-      err = outDesc->AddMIDINode(localInputNodeID, AAX_eMIDINodeType_LocalOutput,
+      err = outDesc->AddMIDINode(localOutputNodeID, AAX_eMIDINodeType_LocalOutput,
                                  businfo.midi_out_name.c_str(), 0xFFFF);
+  }
+  else
+  {
+    err = outDesc->AddPrivateData(localOutputNodeID, sizeof(float),
+                                  AAX_ePrivateDataOptions_DefaultOptions);
   }
 
   if (true)  // setupInfo.mNeedsTransport)
@@ -1216,10 +1222,28 @@ void ClapAsAAX::activatePlugin()
   {
     _gesturedparameters.reserve(8192);
 
+    // For a pure-MIDI CLAP (no audio ports) the AAX component still carries a
+    // placeholder Mono/Stereo audio bus (see getAvailableBusConfigs); capture
+    // its channel counts from the negotiated stem format so the process adapter
+    // can pass that audio through. Zero for normal audio plugins.
+    uint32_t placeholderInChannels = 0, placeholderOutChannels = 0;
+    auto ext_audio = _plugin->_ext._audioports;
+    uint32_t clapInPorts = ext_audio ? ext_audio->count(_plugin->_plugin, true) : 0;
+    uint32_t clapOutPorts = ext_audio ? ext_audio->count(_plugin->_plugin, false) : 0;
+    if (clapInPorts == 0 && clapOutPorts == 0 && _aax_ctrl)
+    {
+      AAX_EStemFormat stem_in = AAX_eStemFormat_None, stem_out = AAX_eStemFormat_None;
+      _aax_ctrl->GetInputStemFormat(&stem_in);
+      _aax_ctrl->GetOutputStemFormat(&stem_out);
+      placeholderInChannels = (uint32_t)AAX_STEM_FORMAT_CHANNEL_COUNT(stem_in);
+      placeholderOutChannels = (uint32_t)AAX_STEM_FORMAT_CHANNEL_COUNT(stem_out);
+    }
+
     _processAdapter = std::make_unique<AAXProcessAdapter>();
     _processAdapter->setupProcessing(_plugin->_plugin, _plugin->getSampleRate(), _plugin->_ext._params,
                                      _plugin->_ext._audioports, this, _gesturedparameters,
-                                     _paramsToProcess, _midi_first_portid, _midi_prefer_mididialect);
+                                     _paramsToProcess, _midi_first_portid, _midi_prefer_mididialect,
+                                     placeholderInChannels, placeholderOutChannels);
 
     _activated = true;
     _plugin->activate();

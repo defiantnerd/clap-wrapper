@@ -24,6 +24,7 @@
 #include "process.h"
 #include "parameter.h"
 #include "detail/shared/fixedqueue.h"
+#include "detail/shared/midi_translation.h"
 #include "detail/os/osutil.h"
 #include "detail/clap/automation.h"
 
@@ -142,9 +143,18 @@ class MIDIOutput
   {
     return _midiPacketList;
   }
+#if AUSDK_MIDI2_AVAILABLE
+  // parallel Universal MIDI Packet view of the same events (protocol 1.0 / MT 0x2);
+  // the framework converts to the host's negotiated protocol on delivery.
+  MIDIEventList *getMIDIEventList()
+  {
+    return _umpList;
+  }
+#endif
   bool addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
   bool addNoteOff(uint8_t channel, uint8_t note, uint8_t velocity);
   bool addMIDI3Byte(const uint8_t *threebytes);
+  bool addSysEx(const uint8_t *data, uint32_t size);
 
   void clear();
   const clap_note_port_info _info;
@@ -155,10 +165,33 @@ class MIDIOutput
   }
 
  private:
+#if AUSDK_MIDI2_AVAILABLE
+  // wrap a MIDI 1.0 channel-voice message into one MT 0x2 UMP word
+  void appendUMP1(uint8_t status, uint8_t data1, uint8_t data2)
+  {
+    // _umpCurrent is null when running on macOS < 11 (the list is never
+    // initialized there) and once the list is full (MIDIEventListAdd returns
+    // nullptr and must not be called with a null curPacket) - drop the event.
+    if (!_umpCurrent) return;
+    if (__builtin_available(macOS 11.0, *))
+    {
+      uint32_t word = ClapWrapper::detail::shared::midi1ToUmpWord(status, data1, data2);
+      _umpCurrent = MIDIEventListAdd(_umpList, sizeof(_umpBuffer), _umpCurrent, 0, 1, &word);
+    }
+  }
+  // pack a SysEx payload (0xF0/0xF7 framing stripped) into MT 0x3 SysEx7 packets
+  void appendUMPSysEx(const uint8_t *data, uint32_t size);
+#endif
+
   MIDIPacket *_current = nullptr;
   MIDIPacketList *_midiPacketList = nullptr;
   uint8_t _buffer[2048];
   uint32_t _numEvents = 0;
+#if AUSDK_MIDI2_AVAILABLE
+  MIDIEventPacket *_umpCurrent = nullptr;
+  MIDIEventList *_umpList = nullptr;
+  uint8_t _umpBuffer[2048];
+#endif
 };
 
 MIDIOutput::MIDIOutput(int auport, const clap_note_port_info &info) : _info(info), _auport(auport)
@@ -166,33 +199,59 @@ MIDIOutput::MIDIOutput(int auport, const clap_note_port_info &info) : _info(info
   _midiPacketList = (MIDIPacketList *)_buffer;
   _current = MIDIPacketListInit(_midiPacketList);
   _numEvents = 0;
+#if AUSDK_MIDI2_AVAILABLE
+  // on macOS < 11 the CoreMIDI EventList API is unavailable; _umpList and
+  // _umpCurrent stay null and every UMP append becomes a no-op
+  if (__builtin_available(macOS 11.0, *))
+  {
+    _umpList = (MIDIEventList *)_umpBuffer;
+    _umpCurrent = MIDIEventListInit(_umpList, kMIDIProtocol_1_0);
+  }
+#endif
 }
 
 void MIDIOutput::clear()
 {
   _current = MIDIPacketListInit(_midiPacketList);
   _numEvents = 0;
+#if AUSDK_MIDI2_AVAILABLE
+  if (__builtin_available(macOS 11.0, *))
+  {
+    if (_umpList) _umpCurrent = MIDIEventListInit(_umpList, kMIDIProtocol_1_0);
+  }
+#endif
 }
 
 bool MIDIOutput::addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity)
 {
+  // once the list is full MIDIPacketListAdd returns nullptr; it must never be
+  // called with a null curPacket, so further events this block are dropped
+  if (!_current) return false;
   uint8_t ev[3] = {static_cast<uint8_t>((uint8_t)0x90u | (channel & 0xF)),
                    static_cast<uint8_t>((note & 0x7F)), static_cast<uint8_t>((velocity & 0x7F))};
   _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 3, (Byte *)ev);
+#if AUSDK_MIDI2_AVAILABLE
+  appendUMP1(ev[0], ev[1], ev[2]);
+#endif
   ++_numEvents;
   return (_current != nullptr);
 }
 bool MIDIOutput::addNoteOff(uint8_t channel, uint8_t note, uint8_t velocity)
 {
+  if (!_current) return false;
   uint8_t ev[3] = {static_cast<uint8_t>((uint8_t)0x80u | (channel & 0xF)),
                    static_cast<uint8_t>((note & 0x7F)), static_cast<uint8_t>((velocity & 0x7F))};
   _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 3, (Byte *)ev);
+#if AUSDK_MIDI2_AVAILABLE
+  appendUMP1(ev[0], ev[1], ev[2]);
+#endif
   ++_numEvents;
   return (_current != nullptr);
 }
 
 bool MIDIOutput::addMIDI3Byte(const uint8_t *threebytes)
 {
+  if (!_current) return false;
   auto cmd = (threebytes[0] >> 4) & 0xFu;
   switch (cmd)
   {
@@ -202,10 +261,16 @@ bool MIDIOutput::addMIDI3Byte(const uint8_t *threebytes)
     case 0x0B:
     case 0x0E:
       _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 3, threebytes);
+#if AUSDK_MIDI2_AVAILABLE
+      appendUMP1(threebytes[0], threebytes[1], threebytes[2]);
+#endif
       break;
     case 0x0C:
     case 0x0D:
       _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 2, threebytes);
+#if AUSDK_MIDI2_AVAILABLE
+      appendUMP1(threebytes[0], threebytes[1], 0);
+#endif
       break;
     default:
       return false;
@@ -214,6 +279,41 @@ bool MIDIOutput::addMIDI3Byte(const uint8_t *threebytes)
   ++_numEvents;
   return (_current != nullptr);
 }
+
+bool MIDIOutput::addSysEx(const uint8_t *data, uint32_t size)
+{
+  if (!_current || !data || size == 0) return false;
+  // MIDIPacketListAdd splits the payload across packets as needed, but the
+  // whole list is still bounded by our fixed _buffer; very long SysEx that does
+  // not fit is dropped (returns nullptr). The CLAP buffer already contains the
+  // full message including the 0xF0/0xF7 framing.
+  _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, size, (Byte *)data);
+  if (_current == nullptr) return false;
+#if AUSDK_MIDI2_AVAILABLE
+  appendUMPSysEx(data, size);
+#endif
+  ++_numEvents;
+  return true;
+}
+
+#if AUSDK_MIDI2_AVAILABLE
+void MIDIOutput::appendUMPSysEx(const uint8_t *data, uint32_t size)
+{
+  if (__builtin_available(macOS 11.0, *))
+  {
+    ClapWrapper::detail::shared::packSysEx7(
+        data, size,
+        [this](uint32_t w0, uint32_t w1)
+        {
+          // stop appending once the list is full or was never initialized
+          // (macOS < 11): MIDIEventListAdd must not be called with a null curPacket
+          if (!_umpCurrent) return;
+          uint32_t words[2] = {w0, w1};
+          _umpCurrent = MIDIEventListAdd(_umpList, sizeof(_umpBuffer), _umpCurrent, 0, 2, words);
+        });
+  }
+}
+#endif
 
 class WrapAsAUV2 : public ausdk::AUBase,
                    public Clap::IHost,
@@ -306,26 +406,121 @@ class WrapAsAUV2 : public ausdk::AUBase,
     return noErr;  //  HandleMIDIEvent(strippedStatus, channel, inData1, inData2, inOffsetSampleFrame);
   }
 
-  OSStatus SysEx(const UInt8 *inData, UInt32 inLength) override
+#if AUSDK_MIDI2_AVAILABLE
+  // MIDI 2.0 / Universal MIDI Packet input. The framework delivers events in the
+  // protocol we advertise via kAudioUnitProperty_AudioUnitMIDIProtocol; we honour
+  // whatever protocol the list actually carries. MIDI 2.0 channel-voice messages
+  // are forwarded raw as CLAP_EVENT_MIDI2 (for plugins that prefer MIDI2); MIDI
+  // 1.0 messages reuse the byte-based translation so they pick up the note /
+  // note-expression handling of the MIDI1 path.
+  OSStatus MIDIEventList(UInt32 inOffsetSampleFrame, const struct MIDIEventList *evtlist) override
   {
+    if (!_processAdapter || !evtlist) return noErr;
+
+    const bool midi2 = (evtlist->protocol == kMIDIProtocol_2_0);
+    const MIDIEventPacket *pkt = &evtlist->packet[0];
+    for (UInt32 p = 0; p < evtlist->numPackets; ++p)
+    {
+      // MusicDevice.h: each event's sample offset is inOffsetSampleFrame plus
+      // the packet's timeStamp (itself a sample offset within the render cycle)
+      const UInt32 offset = inOffsetSampleFrame + static_cast<UInt32>(pkt->timeStamp);
+      for (UInt32 i = 0; i < pkt->wordCount;)
+      {
+        const uint32_t w0 = pkt->words[i];
+        const uint32_t nWords = ClapWrapper::detail::shared::umpMessageWordCount(w0);
+        if (i + nWords > pkt->wordCount) break;  // truncated packet, stop
+
+        const uint32_t mt = (w0 >> 28) & 0xFu;
+        if (midi2 && mt == 0x4u)
+        {
+          if (_midi_understands_midi2)
+          {
+            // MIDI 2.0 channel voice message, forwarded raw
+            _processAdapter->addMIDI2Event(&pkt->words[i], nWords, offset);
+          }
+          else
+          {
+            // the plugin's note port never declared the MIDI2 dialect (a host
+            // ignoring our advertised protocol can still send it): down-convert
+            // to MIDI 1.0 and reuse the byte-based translation, which honours
+            // the dialect the plugin actually asked for
+            uint8_t bytes[3];
+            if (ClapWrapper::detail::shared::midi2ChannelVoiceToMidi1(&pkt->words[i], bytes) > 0)
+            {
+              _processAdapter->addMIDIEvent(bytes[0], bytes[1], bytes[2], offset);
+            }
+          }
+        }
+        else if (mt == 0x2u)
+        {
+          // MIDI 1.0 channel voice message packed into one UMP word
+          const UInt32 status = (w0 >> 16) & 0xFFu;
+          const UInt32 data1 = (w0 >> 8) & 0xFFu;
+          const UInt32 data2 = w0 & 0xFFu;
+          _processAdapter->addMIDIEvent(status, data1, data2, offset);
+        }
+        else if (mt == 0x3u)
+        {
+          // UMP SysEx7 (may span several packets); assembled then delivered
+          handleUMPSysEx7(pkt->words[i], (nWords > 1) ? pkt->words[i + 1] : 0u, offset);
+        }
+        // other message types (utility / system) are not translated
+        i += nWords;
+      }
+      pkt = MIDIEventPacketNext(pkt);
+    }
     return noErr;
   }
 
-  // Notes
-  OSStatus StartNote(MusicDeviceInstrumentID /*inInstrument*/, MusicDeviceGroupID /*inGroupID*/,
+  // Reassemble a UMP SysEx7 packet stream into a single CLAP SysEx event using the
+  // shared reassembler; on a complete message it is already framed with 0xF0/0xF7.
+  void handleUMPSysEx7(uint32_t w0, uint32_t w1, UInt32 offset)
+  {
+    if (!_processAdapter) return;
+    if (_sysexReassembler.feed(w0, w1))
+    {
+      const auto &msg = _sysexReassembler.framedMessage();
+      _processAdapter->addSysExEvent(msg.data(), static_cast<uint32_t>(msg.size()), offset);
+    }
+  }
+#endif
+
+  OSStatus SysEx(const UInt8 *inData, UInt32 inLength) override
+  {
+    if (_processAdapter)
+    {
+      // the AU SysEx entry point carries no sample offset; deliver at frame 0
+      _processAdapter->addSysExEvent(inData, inLength, 0);
+    }
+    return noErr;
+  }
+
+  // Notes (MusicDevice extended-note API)
+  OSStatus StartNote(MusicDeviceInstrumentID /*inInstrument*/, MusicDeviceGroupID inGroupID,
                      NoteInstanceID *outNoteInstanceID, UInt32 inOffsetSampleFrame,
                      const MusicDeviceNoteParams &inParams) override
   {
-    // _processAdapter
-    // _processAdapter->addMIDIEvent(, <#UInt32 inData1#>, <#UInt32 inData2#>, <#UInt32 inOffsetSampleFrame#>);
-    *outNoteInstanceID = inParams.mPitch;
-    return MIDIEvent(0x90, inParams.mPitch, inParams.mVelocity, inOffsetSampleFrame);
+    if (!_processAdapter) return kAudioUnitErr_Uninitialized;
+
+    const int16_t channel = static_cast<int16_t>(inGroupID & 0x0F);
+    const int32_t key = static_cast<int32_t>(inParams.mPitch + 0.5f) & 0x7F;  // nearest MIDI key
+    // Hand back a unique instance id that also embeds the key in its low 7 bits
+    // so StopNote (which only receives the id) can recover it without a table.
+    const int32_t note_id = ((_noteInstanceCounter++ & 0x7FFF) << 7) | key;
+    *outNoteInstanceID = note_id;
+
+    _processAdapter->startNote(note_id, channel, inParams.mPitch, inParams.mVelocity,
+                               inOffsetSampleFrame);
+    return noErr;
   }
 
-  OSStatus StopNote(MusicDeviceGroupID /*inGroupID*/, NoteInstanceID inNoteInstanceID,
+  OSStatus StopNote(MusicDeviceGroupID inGroupID, NoteInstanceID inNoteInstanceID,
                     UInt32 inOffsetSampleFrame) override
   {
-    return MIDIEvent(0x80, inNoteInstanceID, 0, inOffsetSampleFrame);
+    if (!_processAdapter) return kAudioUnitErr_Uninitialized;
+    const int16_t channel = static_cast<int16_t>(inGroupID & 0x0F);
+    _processAdapter->stopNote(static_cast<int32_t>(inNoteInstanceID), channel, inOffsetSampleFrame);
+    return noErr;
   }
 
   // unfortunately hidden in the base c++ file
@@ -539,9 +734,27 @@ class WrapAsAUV2 : public ausdk::AUBase,
   std::atomic<bool> _initialized = false;
 
   // some info about the wrapped clap
+  // audio-port layout captured at PostConstructor. Scanning the CLAP
+  // audio-ports extension (count/get) is only legal while the plugin is
+  // deactivated, so we snapshot it once and never query it live afterwards.
+  struct AudioPortCache
+  {
+    uint32_t channelCount;
+    bool isMain;
+  };
+  std::vector<AudioPortCache> _inputPortCache;
+  std::vector<AudioPortCache> _outputPortCache;
+
   uint32_t _midi_preferred_dialect = 0;
+  uint32_t _midi_supported_dialects = 0;
   bool _midi_wants_midi_input = false;  // takes any input
   bool _midi_understands_midi2 = false;
+  // rolling counter feeding the NoteInstanceID/note_id handed out by StartNote
+  int32_t _noteInstanceCounter = 0;
+#if AUSDK_MIDI2_AVAILABLE
+  // reassembles UMP SysEx7 across multi-packet messages on input
+  ClapWrapper::detail::shared::SysEx7Reassembler _sysexReassembler;
+#endif
   // std::vector<clap_note_port_info_t> _midi_outports_info;
 
   std::string _hostname = "CLAP-as-AUv2";
@@ -562,6 +775,16 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   // ------------- for the MIDI output
   AUMIDIOutputCallbackStruct _midioutput_hostcallback = {nullptr, nullptr};
+#if AUSDK_MIDI2_AVAILABLE
+  // modern MIDI 2.0 / UMP output path (preferred by the host over the callback
+  // above). Atomic because a host may install or clear the block while Render is
+  // invoking it on the audio thread; replaced blocks are parked in
+  // _retiredEventListBlocks instead of being released under the render thread's
+  // feet, and drained in deactivateCLAP()/~WrapAsAUV2 when no render can run.
+  std::atomic<AUMIDIEventListBlock> _midioutput_hosteventlistblock{nullptr};
+  std::vector<AUMIDIEventListBlock> _retiredEventListBlocks;
+  MIDIProtocolID _host_midi_protocol = kMIDIProtocol_1_0;
+#endif
 
   std::atomic_bool _requestUICallback = false;
 
