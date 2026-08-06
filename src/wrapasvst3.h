@@ -384,6 +384,10 @@ class ClapAsVst3 : public Steinberg::Vst::SingleComponentEffect,
   Vst::UnitID getOrCreateUnitInfo(const char *modulename);
   std::map<std::string, Vst::UnitID> _moduleToUnit;
 
+  // pulls current values from the CLAP plugin's params extension into our VST3 parameter tree
+  // (used by both setState and param_rescan)
+  void syncParameterValuesFromClap();
+
   Clap::Library *_library = nullptr;
   int _libraryIndex = 0;
   std::shared_ptr<Clap::Plugin> _plugin;
@@ -416,6 +420,8 @@ class ClapAsVst3 : public Steinberg::Vst::SingleComponentEffect,
 
   // the queue from audiothread to UI thread
   ClapWrapper::detail::shared::fixedqueue<queueEvent, 8192> _queueToUI;
+
+  bool _param_rescan_has_been_called{false};
 
   // for IMidiMapping
   bool _useIMidiMapping = false;
