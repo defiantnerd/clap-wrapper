@@ -1,8 +1,10 @@
 #include "process.h"
+#include "detail/shared/midi_translation.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cassert>
+#include <cstring>
 
 namespace Clap::AUv2
 {
@@ -43,14 +45,17 @@ void ProcessAdapter::setupProcessing(ausdk::AUScope &audioInputs, ausdk::AUScope
                                      const clap_plugin_t *plugin, const clap_plugin_params_t *ext_params,
                                      Clap::IAutomation *automationInterface, ParameterTree *parameters,
                                      IMIDIOutputs *midiouts, uint32_t numMaxSamples,
-                                     uint32_t preferredMIDIDialect)
+                                     uint32_t preferredMIDIDialect, uint32_t supportedMIDIDialects,
+                                     uint32_t clapAudioInputs, uint32_t clapAudioOutputs)
 {
   _plugin = plugin;
   _ext_params = ext_params;
   _automation = automationInterface;
   _parameters = parameters;
 
-  _preferred_midi_dialect = preferredMIDIDialect;
+  _supported_midi_dialects = supportedMIDIDialects;
+  _preferred_midi_dialect =
+      ClapWrapper::detail::shared::chooseInputDialect(preferredMIDIDialect, supportedMIDIDialects);
 
   _midiouts = midiouts;
 
@@ -62,16 +67,27 @@ void ProcessAdapter::setupProcessing(ausdk::AUScope &audioInputs, ausdk::AUScope
   if (numMaxSamples > 0)
   {
     delete[] _silent_input;
-    _silent_input = new float[numMaxSamples];
+    _silent_input = new float[numMaxSamples]{};
 
     delete[] _silent_output;
-    _silent_output = new float[numMaxSamples];
+    _silent_output = new float[numMaxSamples]{};
   }
 
   _numInputs = _audioInputScope->GetNumberOfElements();
   _numOutputs = _audioOutputScope->GetNumberOfElements();
 
-  _processData.audio_inputs_count = _numInputs;
+  // Never hand the plugin more ports than _input_ports/_output_ports have
+  // elements: the AU element counts were fixed at PostConstructor, while the
+  // CLAP counts are re-queried on every (re)activation — a plugin that rescans
+  // its audio ports while deactivated could otherwise make process() index past
+  // the allocation, or receive a null pointer with a non-zero count.
+  _clapNumInputs = std::min(clapAudioInputs, _numInputs);
+  _clapNumOutputs = std::min(clapAudioOutputs, _numOutputs);
+
+  // The plugin is handed its own declared port counts, which may be fewer than
+  // the AU-scope element counts (a note-only plugin gets a placeholder silent AU
+  // output bus but zero CLAP audio ports).
+  _processData.audio_inputs_count = _clapNumInputs;
   delete[] _input_ports;
   _input_ports = nullptr;
 
@@ -97,7 +113,7 @@ void ProcessAdapter::setupProcessing(ausdk::AUScope &audioInputs, ausdk::AUScope
     _processData.audio_inputs = nullptr;
   }
 
-  _processData.audio_outputs_count = _numOutputs;
+  _processData.audio_outputs_count = _clapNumOutputs;
   delete[] _output_ports;
   _output_ports = nullptr;
 
@@ -145,6 +161,7 @@ void ProcessAdapter::setupProcessing(ausdk::AUScope &audioInputs, ausdk::AUScope
   _events.reserve(8192);
   _eventindices.clear();
   _eventindices.reserve(_events.capacity());
+  _sysexBuffers.prepare(16);
 
   _out_events.ctx = this;
 
@@ -172,6 +189,20 @@ void ProcessAdapter::sortEventIndices()
 
 void ProcessAdapter::process(ProcessData &data)
 {
+  // CLAP requires event times within [0, frames_count); a host stamping
+  // MIDIEventList packets with out-of-range timestamps (e.g. mach host time
+  // instead of sample offsets) would otherwise make plugins that index their
+  // buffers by event time read out of bounds — clamp into the block.
+  if (data.numSamples > 0)
+  {
+    for (auto &e : _events)
+    {
+      if (e.header.time >= data.numSamples)
+      {
+        e.header.time = data.numSamples - 1;
+      }
+    }
+  }
   sortEventIndices();
   _processData.frames_count = data.numSamples;
   _transport.flags = 0;
@@ -265,6 +296,12 @@ void ProcessAdapter::process(ProcessData &data)
     {
       assert(myOutBuffers.mBuffers[j].mNumberChannels == 1);
       this->_output_ports[i].data32[j] = (float *)myOutBuffers.mBuffers[j].mData;
+      // placeholder AU output busses beyond the plugin's declared CLAP ports are
+      // not written by the plugin, so emit silence rather than leaving them stale.
+      if (i >= _clapNumOutputs)
+      {
+        std::memset(this->_output_ports[i].data32[j], 0, sizeof(float) * data.numSamples);
+      }
     }
   }
 #endif
@@ -276,6 +313,7 @@ void ProcessAdapter::process(ProcessData &data)
   // clean up and prepare the events for the next cycle
   _events.clear();
   _eventindices.clear();
+  _sysexBuffers.reset();
 }
 
 uint32_t ProcessAdapter::input_events_size(const struct clap_input_events *list)
@@ -313,12 +351,6 @@ bool ProcessAdapter::output_events_try_push(const struct clap_output_events *lis
 
 bool ProcessAdapter::enqueueOutputEvent(const clap_event_header_t *event)
 {
-#if 0
-  clap_multi_event e;
-  memcpy(&e, event, event->size);
-  _outevents.emplace_back(e);
-#endif
-
   switch (event->type)
   {
     case CLAP_EVENT_NOTE_ON:
@@ -335,50 +367,16 @@ bool ProcessAdapter::enqueueOutputEvent(const clap_event_header_t *event)
       return true;
       break;
     case CLAP_EVENT_NOTE_EXPRESSION:
+    {
+      auto nevt = reinterpret_cast<const clap_multi_event_t *>(event);
+      _midiouts->send(*nevt);
       return true;
-      break;
+    }
+    break;
     case CLAP_EVENT_PARAM_VALUE:
     {
       auto ev = (clap_event_param_value *)event;
       _automation->onPerformEdit(ev);
-
-      // auto param = this->_gesturedParameters
-#if 0
-      auto param = (Vst3Parameter*)this->parameters->getParameter(ev->param_id & 0x7FFFFFFF);
-      if (param)
-      {
-        auto param_id = param->getInfo().id;
-
-        // if the parameter is marked as being edited in the UI, pass the value
-        // to the queue so it can be given to the IComponentHandler
-        if (std::find(_gesturedParameters.begin(), _gesturedParameters.end(), param_id) !=
-            _gesturedParameters.end())
-        {
-          _automation->onPerformEdit(ev);
-        }
-
-        // it also needs to be communicated to the audio thread,otherwise the parameter jumps back to the original value
-        Steinberg::int32 index = 0;
-        // addParameterData() does check if there is already a queue and returns it,
-        // actually, it should be called getParameterQueue()
-
-        // the vst3 validator from the VST3 SDK does not provide always an object to output parameters, probably other hosts won't to that, too
-        // therefore we are cautious.
-        if (_vstdata->outputParameterChanges)
-        {
-          auto list = _vstdata->outputParameterChanges->addParameterData(param_id, index);
-
-          // the implementation of addParameterData() in the SDK always returns a queue, but Cubase 12 (perhaps others, too)
-          // sometimes don't return a queue object during the first bunch of process calls. I (df) haven't figured out, why.
-          // therefore we have to check if there is an output queue at all
-          if (list)
-          {
-            Steinberg::int32 index2 = 0;
-            list->addPoint(ev->header.time, param->asVst3Value(ev->value), index2);
-          }
-        }
-      }
-#endif
     }
 
       return true;
@@ -413,9 +411,19 @@ bool ProcessAdapter::enqueueOutputEvent(const clap_event_header_t *event)
       break;
 
     case CLAP_EVENT_MIDI_SYSEX:
-    case CLAP_EVENT_MIDI2:
+    {
+      auto nevt = reinterpret_cast<const clap_multi_event_t *>(event);
+      _midiouts->send(*nevt);
       return true;
-      break;
+    }
+    break;
+    case CLAP_EVENT_MIDI2:
+    {
+      auto nevt = reinterpret_cast<const clap_multi_event_t *>(event);
+      _midiouts->send(*nevt);
+      return true;
+    }
+    break;
     default:
       break;
   }
@@ -486,45 +494,67 @@ void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData
       // no running status
       break;
     case 8:  // note off
-
-      if (_preferred_midi_dialect == CLAP_NOTE_DIALECT_CLAP)
-      {
-        n.header.type = CLAP_EVENT_NOTE_OFF;
-        n.header.size = sizeof(clap_event_note_t);
-
-        n.note.port_index = 0;
-        n.note.note_id = -1;
-        n.note.key = (inData1 & 0x7F);
-        n.note.velocity = 1.f * (inData2 & 0x7F) / 127.f;
-        n.note.channel = channel;
-      }
-      else
-      {
-        n.header.type = CLAP_EVENT_MIDI;
-        n.header.size = sizeof(clap_event_midi_t);
-
-        n.midi.port_index = 0;
-        n.midi.data[0] = inStatus;
-        n.midi.data[1] = inData1;
-        n.midi.data[2] = inData2;
-      }
-      this->_eventindices.emplace_back((this->_events.size()));
-      this->_events.emplace_back(n);
-      removeFromActiveNotes(&n.note);
-      this->output_events_try_push(&this->_out_events, &n.header);
-      break;
     case 9:  // note on
+    {
+      // MIDI 1.0 running-status convention: a note-on with velocity 0 is a note-off
+      const bool noteOn = (strippedStatus == 9) && ((inData2 & 0x7F) != 0);
+      switch (_preferred_midi_dialect)
+      {
+        case CLAP_NOTE_DIALECT_CLAP:
+          n.header.type = noteOn ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF;
+          n.header.size = sizeof(clap_event_note_t);
 
+          n.note.port_index = 0;
+          n.note.note_id = -1;
+          n.note.key = (inData1 & 0x7F);
+          n.note.velocity = 1.f * (inData2 & 0x7F) / 127.f;
+          n.note.channel = channel;
+          break;
+        case CLAP_NOTE_DIALECT_MIDI:
+        case CLAP_NOTE_DIALECT_MIDI_MPE:
+        case CLAP_NOTE_DIALECT_MIDI2:
+        default:
+          // A legacy MIDI1 source note maps to raw MIDI for every non-CLAP
+          // dialect. (Synthesising MIDI2/UMP from a MIDI1 source, when a plugin
+          // prefers MIDI2, is handled on the UMP path, not here.)
+          n.header.type = CLAP_EVENT_MIDI;
+          n.header.size = sizeof(clap_event_midi_t);
+
+          n.midi.port_index = 0;
+          n.midi.data[0] = inStatus;
+          n.midi.data[1] = inData1;
+          n.midi.data[2] = inData2;
+          break;
+      }
+      this->_eventindices.emplace_back((this->_events.size()));
+      this->_events.emplace_back(n);
+      // Active-note bookkeeping backs note-expression translation and is only
+      // meaningful for typed CLAP notes; the n.note union fields are only valid
+      // when the CLAP branch above populated them.
       if (_preferred_midi_dialect == CLAP_NOTE_DIALECT_CLAP)
       {
-        n.header.type = CLAP_EVENT_NOTE_ON;
-        n.header.size = sizeof(clap_event_note_t);
+        if (noteOn)
+          addToActiveNotes(&n.note);
+        else
+          removeFromActiveNotes(&n.note);
+      }
+      break;
+    }
+    case 0xA:  // polyphonic (per-key) pressure / aftertouch
+      if (_preferred_midi_dialect == CLAP_NOTE_DIALECT_CLAP)
+      {
+        // translate to a per-note pressure expression. note_id is a wildcard
+        // (-1) because notes created on the MIDI input path have no id; the
+        // key+channel identify the target note.
+        n.header.type = CLAP_EVENT_NOTE_EXPRESSION;
+        n.header.size = sizeof(clap_event_note_expression_t);
 
-        n.note.port_index = 0;
-        n.note.note_id = -1;
-        n.note.key = (inData1 & 0x7F);
-        n.note.velocity = 1.f * (inData2 & 0x7F) / 127.f;
-        n.note.channel = channel;
+        n.noteexpression.expression_id = CLAP_NOTE_EXPRESSION_PRESSURE;
+        n.noteexpression.note_id = -1;
+        n.noteexpression.port_index = 0;
+        n.noteexpression.channel = channel;
+        n.noteexpression.key = (inData1 & 0x7F);
+        n.noteexpression.value = 1.0 * (inData2 & 0x7F) / 127.0;  // range 0..1
       }
       else
       {
@@ -536,19 +566,61 @@ void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData
         n.midi.data[1] = inData1;
         n.midi.data[2] = inData2;
       }
-
       this->_eventindices.emplace_back((this->_events.size()));
       this->_events.emplace_back(n);
-      addToActiveNotes(&n.note);
-
-      this->output_events_try_push(&this->_out_events, &n.header);
-
       break;
-    case 0xA:  // any other MIDI message with 1 or 2 data bytes
-    case 0xB:
-    case 0xC:
-    case 0xD:
-    case 0xE:
+    case 0xD:  // channel pressure (2 bytes) -> channel-wide pressure expression
+      if (_preferred_midi_dialect == CLAP_NOTE_DIALECT_CLAP)
+      {
+        n.header.type = CLAP_EVENT_NOTE_EXPRESSION;
+        n.header.size = sizeof(clap_event_note_expression_t);
+        n.noteexpression.expression_id = CLAP_NOTE_EXPRESSION_PRESSURE;
+        n.noteexpression.note_id = -1;
+        n.noteexpression.port_index = 0;
+        n.noteexpression.channel = channel;
+        n.noteexpression.key = -1;                                // channel-wide (wildcard key)
+        n.noteexpression.value = 1.0 * (inData1 & 0x7F) / 127.0;  // range 0..1
+      }
+      else
+      {
+        n.header.type = CLAP_EVENT_MIDI;
+        n.header.size = sizeof(clap_event_midi_t);
+        n.midi.port_index = 0;
+        n.midi.data[0] = inStatus;
+        n.midi.data[1] = inData1;
+        n.midi.data[2] = inData2;
+      }
+      this->_eventindices.emplace_back((this->_events.size()));
+      this->_events.emplace_back(n);
+      break;
+    case 0xE:  // pitch bend -> channel-wide tuning expression (+/- 2 semitones)
+      if (_preferred_midi_dialect == CLAP_NOTE_DIALECT_CLAP)
+      {
+        const int bend14 = ((inData2 & 0x7F) << 7) | (inData1 & 0x7F);
+        n.header.type = CLAP_EVENT_NOTE_EXPRESSION;
+        n.header.size = sizeof(clap_event_note_expression_t);
+        n.noteexpression.expression_id = CLAP_NOTE_EXPRESSION_TUNING;
+        n.noteexpression.note_id = -1;
+        n.noteexpression.port_index = 0;
+        n.noteexpression.channel = channel;
+        n.noteexpression.key = -1;                                // channel-wide (wildcard key)
+        n.noteexpression.value = (bend14 - 8192) / 8192.0 * 2.0;  // semitones
+      }
+      else
+      {
+        n.header.type = CLAP_EVENT_MIDI;
+        n.header.size = sizeof(clap_event_midi_t);
+        n.midi.port_index = 0;
+        n.midi.data[0] = inStatus;
+        n.midi.data[1] = inData1;
+        n.midi.data[2] = inData2;
+      }
+      this->_eventindices.emplace_back((this->_events.size()));
+      this->_events.emplace_back(n);
+      break;
+    case 0xB:  // control change
+    case 0xC:  // program change (2 bytes)
+      // CLAP has no generic typed event for these; forward as raw MIDI.
       n.header.type = CLAP_EVENT_MIDI;
       n.header.size = sizeof(clap_event_midi_t);
 
@@ -562,6 +634,153 @@ void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData
       break;
     case 0xF:
       break;
+  }
+}
+
+void ProcessAdapter::addMIDI2Event(const uint32_t *words, uint32_t nWords, UInt32 inOffsetSampleFrame)
+{
+  if (!words || nWords == 0) return;
+
+  auto deltaFrames = inOffsetSampleFrame & kMusicDeviceSampleFrameMask_SampleOffset;
+  bool live = (inOffsetSampleFrame & kMusicDeviceSampleFrameMask_IsScheduled) != 0;
+
+  clap_multi_event n;
+  n.header.time = deltaFrames;
+  n.header.type = CLAP_EVENT_MIDI2;
+  n.header.size = sizeof(clap_event_midi2_t);
+  n.header.flags = 0 + (live ? CLAP_EVENT_IS_LIVE : 0);
+  n.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+
+  n.midi2.port_index = 0;
+  n.midi2.data[0] = words[0];
+  n.midi2.data[1] = (nWords > 1) ? words[1] : 0;
+  n.midi2.data[2] = (nWords > 2) ? words[2] : 0;
+  n.midi2.data[3] = (nWords > 3) ? words[3] : 0;
+
+  this->_eventindices.emplace_back(this->_events.size());
+  this->_events.emplace_back(n);
+}
+
+void ProcessAdapter::addSysExEvent(const uint8_t *data, uint32_t length, UInt32 inOffsetSampleFrame)
+{
+  if (!data || length == 0) return;
+
+  auto deltaFrames = inOffsetSampleFrame & kMusicDeviceSampleFrameMask_SampleOffset;
+  bool live = (inOffsetSampleFrame & kMusicDeviceSampleFrameMask_IsScheduled) != 0;
+
+  // keep the payload alive until the plugin consumes it during process()
+  const auto &owned = _sysexBuffers.acquire(data, length);
+
+  clap_multi_event n;
+  n.header.time = deltaFrames;
+  n.header.type = CLAP_EVENT_MIDI_SYSEX;
+  n.header.size = sizeof(clap_event_midi_sysex_t);
+  n.header.flags = 0 + (live ? CLAP_EVENT_IS_LIVE : 0);
+  n.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+
+  n.sysex.port_index = 0;
+  n.sysex.buffer = owned.data();
+  n.sysex.size = static_cast<uint32_t>(owned.size());
+
+  this->_eventindices.emplace_back(this->_events.size());
+  this->_events.emplace_back(n);
+}
+
+void ProcessAdapter::startNote(int32_t note_id, int16_t channel, float pitch, float velocity,
+                               UInt32 inOffsetSampleFrame)
+{
+  auto deltaFrames = inOffsetSampleFrame & kMusicDeviceSampleFrameMask_SampleOffset;
+  bool live = (inOffsetSampleFrame & kMusicDeviceSampleFrameMask_IsScheduled) != 0;
+  const int16_t key = static_cast<int16_t>(note_id & 0x7F);
+
+  clap_multi_event n;
+  n.header.time = deltaFrames;
+  n.header.flags = 0 + (live ? CLAP_EVENT_IS_LIVE : 0);
+  n.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+
+  if (_preferred_midi_dialect == CLAP_NOTE_DIALECT_CLAP)
+  {
+    n.header.type = CLAP_EVENT_NOTE_ON;
+    n.header.size = sizeof(clap_event_note_t);
+    n.note.port_index = 0;
+    n.note.note_id = note_id;
+    n.note.channel = channel;
+    n.note.key = key;
+    n.note.velocity = velocity / 127.0;
+    this->_eventindices.emplace_back(this->_events.size());
+    this->_events.emplace_back(n);
+    addToActiveNotes(&n.note);
+
+    // carry the fractional part of the pitch as a per-note tuning expression
+    const double frac = static_cast<double>(pitch) - static_cast<double>(key);
+    if (frac != 0.0)
+    {
+      clap_multi_event t;
+      t.header.time = deltaFrames;
+      t.header.flags = n.header.flags;
+      t.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+      t.header.type = CLAP_EVENT_NOTE_EXPRESSION;
+      t.header.size = sizeof(clap_event_note_expression_t);
+      t.noteexpression.expression_id = CLAP_NOTE_EXPRESSION_TUNING;  // semitones
+      t.noteexpression.note_id = note_id;
+      t.noteexpression.port_index = 0;
+      t.noteexpression.channel = channel;
+      t.noteexpression.key = key;
+      t.noteexpression.value = frac;
+      this->_eventindices.emplace_back(this->_events.size());
+      this->_events.emplace_back(t);
+    }
+  }
+  else
+  {
+    float v = velocity;
+    if (v < 0.f) v = 0.f;
+    if (v > 127.f) v = 127.f;
+    n.header.type = CLAP_EVENT_MIDI;
+    n.header.size = sizeof(clap_event_midi_t);
+    n.midi.port_index = 0;
+    n.midi.data[0] = static_cast<uint8_t>(0x90u | (channel & 0x0F));
+    n.midi.data[1] = static_cast<uint8_t>(key & 0x7F);
+    n.midi.data[2] = static_cast<uint8_t>(v);
+    this->_eventindices.emplace_back(this->_events.size());
+    this->_events.emplace_back(n);
+  }
+}
+
+void ProcessAdapter::stopNote(int32_t note_id, int16_t channel, UInt32 inOffsetSampleFrame)
+{
+  auto deltaFrames = inOffsetSampleFrame & kMusicDeviceSampleFrameMask_SampleOffset;
+  bool live = (inOffsetSampleFrame & kMusicDeviceSampleFrameMask_IsScheduled) != 0;
+  const int16_t key = static_cast<int16_t>(note_id & 0x7F);
+
+  clap_multi_event n;
+  n.header.time = deltaFrames;
+  n.header.flags = 0 + (live ? CLAP_EVENT_IS_LIVE : 0);
+  n.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+
+  if (_preferred_midi_dialect == CLAP_NOTE_DIALECT_CLAP)
+  {
+    n.header.type = CLAP_EVENT_NOTE_OFF;
+    n.header.size = sizeof(clap_event_note_t);
+    n.note.port_index = 0;
+    n.note.note_id = note_id;
+    n.note.channel = channel;
+    n.note.key = key;
+    n.note.velocity = 0.0;
+    this->_eventindices.emplace_back(this->_events.size());
+    this->_events.emplace_back(n);
+    removeFromActiveNotes(&n.note);
+  }
+  else
+  {
+    n.header.type = CLAP_EVENT_MIDI;
+    n.header.size = sizeof(clap_event_midi_t);
+    n.midi.port_index = 0;
+    n.midi.data[0] = static_cast<uint8_t>(0x80u | (channel & 0x0F));
+    n.midi.data[1] = static_cast<uint8_t>(key & 0x7F);
+    n.midi.data[2] = 0;
+    this->_eventindices.emplace_back(this->_events.size());
+    this->_events.emplace_back(n);
   }
 }
 

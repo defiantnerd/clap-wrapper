@@ -82,7 +82,8 @@ class AAXProcessAdapter
   void setupProcessing(const clap_plugin_t *plugin, double samplerate,
                        const clap_plugin_params_t *ext_param, const clap_plugin_audio_ports *ext_audio,
                        Clap::IAutomation *automation, std::vector<clap_id> &gesturedParameters,
-                       ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI);
+                       ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI,
+                       uint32_t placeholderInChannels, uint32_t placeholderOutChannels);
   void process(SAAX_Wrapper_AlgorithmicContext *context);
   void flush();
 
@@ -131,6 +132,17 @@ class AAXProcessAdapter
   void addToActiveNotes(const clap_event_note *note);
   void removeFromActiveNotes(const clap_event_note *note);
 
+  // Post a single MIDI 1.0 message (up to 3 bytes) to the AAX local MIDI
+  // output node, filtered to the channel-voice messages Pro Tools routes out
+  // of a plug-in. No-op when the plugin declares no MIDI out (node is a
+  // placeholder / nullptr). Called from enqueueOutputEvent while the plugin
+  // is inside process() and _outputNode is valid.
+  void postMIDI1(uint32_t timestamp, const uint8_t *bytes, uint32_t length);
+
+  // Post a (possibly long) SysEx message as a series of <=4-byte AAX packets
+  // sharing one timestamp. Best-effort: Pro Tools does not route plug-in SysEx.
+  void postSysEx(uint32_t timestamp, const uint8_t *data, uint32_t size);
+
   // the functions for the event list callback
   static uint32_t CLAP_ABI input_events_size(const struct clap_input_events *list);
   static const clap_event_header_t *CLAP_ABI input_events_get(const struct clap_input_events *list,
@@ -139,6 +151,19 @@ class AAXProcessAdapter
   // MIDI
   uint32_t _midi_first_portid = 0;
   bool _midi_prefer_mididialect = true;
+
+  // Local MIDI output node for the current process() call, captured from the
+  // AAX algorithm context. Only valid for the duration of process(); reset to
+  // nullptr afterwards so a stale node can never be posted to.
+  AAX_IMIDINode *_outputNode = nullptr;
+
+  // Placeholder-stem passthrough: a pure-MIDI CLAP (no audio ports) is wrapped
+  // as an AAX MIDI-effect component that still carries a Mono/Stereo audio bus.
+  // When these are non-zero the CLAP has no audio ports, so process() copies the
+  // AAX audio input straight to the output (matching DemoMIDI_Transpose) instead
+  // of leaving the output uninitialised. Zero for normal audio plugins.
+  uint32_t _placeholderInChannels = 0;
+  uint32_t _placeholderOutChannels = 0;
 };
 
 AAX_Result GetEffectDescriptions(AAX_ICollection *outDescriptions);

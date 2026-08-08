@@ -40,6 +40,9 @@
 # CLAP_WRAPPER_BUILD_AUV2        Build the AUv2 wrapper (.component); requires the AudioUnitSDK
 # CLAP_WRAPPER_BUILD_AUV3        Build the AUv3 app extension (.appex) plus its standalone
 #                                host app; requires the Xcode generator (-G Xcode)
+# CLAP_WRAPPER_BUILD_AAX         Build the AAX wrapper; only effective where AAX is supported
+#                                (macOS and non-ARM MSVC Windows, never Linux) and requires
+#                                the AAX SDK
 # CLAP_WRAPPER_BUILD_STANDALONE  Build a simple standalone executable hosting the CLAP
 # CLAP_WRAPPER_BUILD_TESTS       Build the test CLAP wrappers
 #
@@ -95,7 +98,7 @@ option(CLAP_WRAPPER_BUILD_TESTS "Build test CLAP wrappers" OFF)
 
 project(clap-wrapper
 	LANGUAGES C CXX
-	VERSION 0.15.1
+	VERSION 0.16.0
 	DESCRIPTION "CLAP-as-X wrappers"
 )
 set(CLAP_WRAPPER_VERSION "${PROJECT_VERSION}" CACHE STRING "Version of the wrapper project")

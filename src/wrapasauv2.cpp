@@ -3,6 +3,7 @@
 #include <set>
 #include <limits>
 #include <cassert>
+#include <Block.h>
 
 extern bool fillAudioUnitCocoaView(AudioUnitCocoaViewInfo *viewInfo, std::shared_ptr<Clap::Plugin>);
 
@@ -155,6 +156,11 @@ WrapAsAUV2::WrapAsAUV2(AUV2_Type type, const std::string &clapname, const std::s
 
 WrapAsAUV2::~WrapAsAUV2()
 {
+#if AUSDK_MIDI2_AVAILABLE
+  if (auto blk = _midioutput_hosteventlistblock.exchange(nullptr)) Block_release(blk);
+  for (auto blk : _retiredEventListBlocks) Block_release(blk);
+  _retiredEventListBlocks.clear();
+#endif
   if (_plugin)
   {
     if (_uiIsOpened && _uiconn._canary)
@@ -309,7 +315,6 @@ void WrapAsAUV2::setupMIDIBusses(const clap_plugin_t *plugin, const clap_plugin_
   if (!noteports) return;
   auto numMIDIInPorts = noteports->count(plugin, true);
   auto numMIDIOutPorts = noteports->count(plugin, false);
-  (void)numMIDIOutPorts;  // TODO: remove this when MIDI out is implemented
 
   // fprintf(stderr, "\tMIDI in: %d, out: %d\n", (int)numMIDIInPorts, (int)numMIDIOutPorts);
   /*
@@ -327,6 +332,7 @@ void WrapAsAUV2::setupMIDIBusses(const clap_plugin_t *plugin, const clap_plugin_
     if (noteports->get(plugin, 0, true, &info))
     {
       _midi_preferred_dialect = info.preferred_dialect;
+      _midi_supported_dialects = info.supported_dialects;
       _midi_understands_midi2 = (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI2);
     }
   }
@@ -348,9 +354,14 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
   // creating parameters.
 
-  _clumps.reset();
+  // Held for the whole rebuild, so that a host reading kAudioUnitProperty_ParameterInfo
+  // on its own thread sees the tree either before or after this, never during.
+  std::lock_guard<std::mutex> guard(_paramTreeMutex);
+
+  // _clumps is not cleared here, and cannot be -- see the note on the class.
   _orderedParameterList.clear();
   _paramOrderingProvided = false;
+  _bypassParamID = CLAP_INVALID_ID;
   auto *p = _plugin->_ext._params;
   if (p)
   {
@@ -426,6 +437,18 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
           else
           {
             piter->second->updateInfo(_plugin->_plugin, p, paraminfo);
+          }
+          // Assign the clump id here rather than leaving it to GetParameterInfo,
+          // so that the ids follow parameter order and are settled before the
+          // host is told there is anything to read.
+          if (paraminfo.module[0] != 0)
+          {
+            _clumps.addClump(paraminfo.module);
+          }
+          if (paraminfo.flags & CLAP_PARAM_IS_BYPASS)
+          {
+            _bypassParamID = paraminfo.id;
+            _isBypassed = (result >= 0.5 * (paraminfo.min_value + paraminfo.max_value));
           }
           Globals()->SetParameter(paraminfo.id, result);
           _orderedParameterList.push_back(static_cast<AudioUnitParameterID>(paraminfo.id));
@@ -510,6 +533,10 @@ OSStatus WrapAsAUV2::GetParameterInfo(AudioUnitScope inScope, AudioUnitParameter
   // const uint64_t stdflag = kAudioUnitParameterFlag_IsReadable | kAudioUnitParameterFlag_IsWritable;
   if (inScope == kAudioUnitScope_Global)
   {
+    // A host may ask from any thread while setupParameters() is rebuilding the
+    // tree on the main one -- the CFRetain below used to race the CFRelease in
+    // Parameter::updateInfo().
+    std::lock_guard<std::mutex> guard(_paramTreeMutex);
     auto pi = _parametertree.find(inParameterID);
     if (pi != _parametertree.end())
     {
@@ -517,6 +544,7 @@ OSStatus WrapAsAUV2::GetParameterInfo(AudioUnitScope inScope, AudioUnitParameter
       const auto &info = f->info();
 
       outParameterInfo.flags = f->AudioUnitFlags();
+      outParameterInfo.unit = f->AudioUnitUnit();
 
       // according to the documentation, the name field should be zeroed. In fact, AULab does display anything then.
       // strcpy(outParameterInfo.name, info.name);
@@ -561,17 +589,56 @@ OSStatus WrapAsAUV2::SetParameter(AudioUnitParameterID inID, AudioUnitScope inSc
   return AUBase::SetParameter(inID, inScope, inElement, inValue, inBufferOffsetInFrames);
 }
 
+void WrapAsAUV2::SetBypassEffect(bool bypass)
+{
+  _isBypassed = bypass;
+  if (_bypassParamID != CLAP_INVALID_ID)
+  {
+    // The value is copied out under the lock rather than the call being made
+    // under it: SetParameter reaches the process adapter, which must not wait on
+    // the main thread's rebuild.
+    std::optional<double> value;
+    {
+      std::lock_guard<std::mutex> guard(_paramTreeMutex);
+      auto p = _parametertree.find(_bypassParamID);
+      if (p != _parametertree.end())
+      {
+        const auto &info = p->second->info();
+        value = bypass ? info.max_value : info.min_value;
+      }
+    }
+    if (value)
+    {
+      SetParameter(_bypassParamID, kAudioUnitScope_Global, 0, *value, 0);
+    }
+  }
+}
+
 OSStatus WrapAsAUV2::CopyClumpName(AudioUnitScope inScope, UInt32 inClumpID, UInt32 inDesiredNameLength,
                                    CFStringRef *outClumpName)
 {
   if (outClumpName == nullptr) return kAudioUnitErr_InvalidParameter;
   if (inScope == kAudioUnitScope_Global)
   {
+    // By value: the map this came out of belongs to the main thread and may be
+    // rewritten the moment the lock inside getClump() is dropped.
     auto p = _clumps.getClump(inClumpID);
     if (p)
     {
-      auto const len = std::min(strlen(p), (size_t)inDesiredNameLength);
-      *outClumpName = CFStringCreateWithBytes(NULL, (const UInt8 *)p, len, kCFStringEncodingUTF8, false);
+      // A desired length of zero means "no limit", not "the empty string". The
+      // SDK clamps kAudioUnitParameterName_Full (-1) to zero on the way in, and
+      // that is how a host asks for the untruncated name.
+      auto len = p->size();
+      if (inDesiredNameLength > 0)
+      {
+        len = std::min(len, (size_t)inDesiredNameLength);
+      }
+      auto name =
+          CFStringCreateWithBytes(NULL, (const UInt8 *)p->data(), len, kCFStringEncodingUTF8, false);
+      // Truncation can land in the middle of a UTF-8 sequence, which fails the
+      // conversion; a null here with noErr would be released by the host.
+      if (name == nullptr) return kAudioUnitErr_InvalidPropertyValue;
+      *outClumpName = name;
       return noErr;
     }
   }
@@ -694,7 +761,25 @@ OSStatus WrapAsAUV2::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope in
       case kAudioUnitProperty_MIDIOutputCallback:
         outWritable = true;
         outDataSize = sizeof(AUMIDIOutputCallbackStruct);
+        return noErr;
         break;
+#if AUSDK_MIDI2_AVAILABLE
+      case kAudioUnitProperty_AudioUnitMIDIProtocol:
+        outWritable = false;
+        outDataSize = sizeof(SInt32);
+        return noErr;
+        break;
+      case kAudioUnitProperty_MIDIOutputEventListCallback:
+        outWritable = true;
+        outDataSize = sizeof(AUMIDIEventListBlock);
+        return noErr;
+        break;
+      case kAudioUnitProperty_HostMIDIProtocol:
+        outWritable = true;
+        outDataSize = sizeof(SInt32);
+        return noErr;
+        break;
+#endif
 
         // custom
       case kAudioUnitProperty_ClapWrapper_UIConnection_id:
@@ -830,6 +915,16 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
         *static_cast<UInt32 *>(outData) = 1;
         return noErr;
         break;
+#if AUSDK_MIDI2_AVAILABLE
+      case kAudioUnitProperty_AudioUnitMIDIProtocol:
+        // the protocol we want our MIDI input delivered in: MIDI 2.0 only when
+        // the hosted plugin actually prefers the MIDI2 note dialect, otherwise
+        // MIDI 1.0 so everything flows through the (richer) MIDI1 translation.
+        *static_cast<SInt32 *>(outData) =
+            (_midi_preferred_dialect == CLAP_NOTE_DIALECT_MIDI2) ? kMIDIProtocol_2_0 : kMIDIProtocol_1_0;
+        return noErr;
+        break;
+#endif
       default:
         break;
     }
@@ -870,8 +965,32 @@ OSStatus WrapAsAUV2::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
         // this is actually read only
         return noErr;
         break;
+#if AUSDK_MIDI2_AVAILABLE
+      case kAudioUnitProperty_MIDIOutputEventListCallback:
+      {
+        if (inDataSize < sizeof(AUMIDIEventListBlock)) return kAudioUnitErr_InvalidPropertyValue;
+        AUMIDIEventListBlock newblk = nullptr;
+        if (inData)
+        {
+          auto blk = *static_cast<const AUMIDIEventListBlock *>(inData);
+          if (blk) newblk = Block_copy(blk);
+        }
+        // Render may be invoking the current block on the audio thread right now:
+        // swap atomically and retire the old block instead of releasing it here.
+        // Retired blocks are released in deactivateCLAP()/~WrapAsAUV2.
+        auto oldblk = _midioutput_hosteventlistblock.exchange(newblk);
+        if (oldblk) _retiredEventListBlocks.push_back(oldblk);
+        return noErr;
+      }
+      case kAudioUnitProperty_HostMIDIProtocol:
+        if (inDataSize < sizeof(SInt32)) return kAudioUnitErr_InvalidPropertyValue;
+        _host_midi_protocol = static_cast<MIDIProtocolID>(*static_cast<const SInt32 *>(inData));
+        return noErr;
+        break;
+#else
       case kAudioUnitProperty_MIDIOutputEventListCallback:
         break;
+#endif
       case kAudioUnitProperty_MIDIOutputCallback:
         if (inDataSize < sizeof(AUMIDIOutputCallbackStruct)) return kAudioUnitErr_InvalidPropertyValue;
 
@@ -992,8 +1111,18 @@ void WrapAsAUV2::activateCLAP()
     _plugin->setBlockSizes(minSampleFrames, maxSampleFrames);
     _plugin->setSampleRate(Output(0).GetStreamFormat().mSampleRate);
 
+    // the plugin's actually-declared audio port counts (0 when it has no
+    // audio-ports extension); these may be fewer than the AU element counts
+    uint32_t clapAudioInputs = 0, clapAudioOutputs = 0;
+    if (_plugin->_ext._audioports)
+    {
+      clapAudioInputs = _plugin->_ext._audioports->count(_plugin->_plugin, true);
+      clapAudioOutputs = _plugin->_ext._audioports->count(_plugin->_plugin, false);
+    }
+
     _processAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this,
-                                     &_parametertree, this, maxSampleFrames, _midi_preferred_dialect);
+                                     &_parametertree, this, maxSampleFrames, _midi_preferred_dialect,
+                                     _midi_supported_dialects, clapAudioInputs, clapAudioOutputs);
 
     _plugin->activate();
     _plugin->start_processing();
@@ -1011,6 +1140,14 @@ void WrapAsAUV2::deactivateCLAP()
     _plugin->deactivate();
   }
   _midioutput_hostcallback = {nullptr, nullptr};
+#if AUSDK_MIDI2_AVAILABLE
+  // No render can run once the AU is uninitialized: drop the event-list block
+  // too (a stale block would shadow a legacy callback installed on the next
+  // initialization) and release everything retired by SetProperty swaps.
+  if (auto blk = _midioutput_hosteventlistblock.exchange(nullptr)) Block_release(blk);
+  for (auto blk : _retiredEventListBlocks) Block_release(blk);
+  _retiredEventListBlocks.clear();
+#endif
 }
 
 OSStatus WrapAsAUV2::Render(AudioUnitRenderActionFlags &inFlags, const AudioTimeStamp &inTimeStamp,
@@ -1061,7 +1198,20 @@ OSStatus WrapAsAUV2::Render(AudioUnitRenderActionFlags &inFlags, const AudioTime
       {
         if (i->hasEvents())
         {
-          if (_midioutput_hostcallback.midiOutputCallback)
+#if AUSDK_MIDI2_AVAILABLE
+          // prefer the modern UMP/EventList path when the host provided one
+          // (load once: SetProperty may swap the block concurrently)
+          if (auto evtblock = _midioutput_hosteventlistblock.load())
+          {
+            auto evtlist = i->getMIDIEventList();
+            [[maybe_unused]] OSStatus result =
+                evtblock(static_cast<AUEventSampleTime>(inTimeStamp.mSampleTime),
+                         static_cast<uint8_t>(i->_auport), evtlist);
+            assert(result == noErr);
+          }
+          else
+#endif
+              if (_midioutput_hostcallback.midiOutputCallback)
           {
             auto userd = _midioutput_hostcallback.userData;
             auto pktlist = i->getMIDIPacketList();
@@ -1172,6 +1322,27 @@ void WrapAsAUV2::onIdle()
       case queueEvent::type::editvalue:
       {
         Globals()->SetParameter(e._data._id, e._data._value.value);
+        if (e._data._id == _bypassParamID)
+        {
+          // Decided under the lock, announced outside it: PropertyChanged runs
+          // the host's listeners synchronously and they are free to come back in
+          // through the property getters.
+          std::optional<bool> bypassed;
+          {
+            std::lock_guard<std::mutex> guard(_paramTreeMutex);
+            auto p = _parametertree.find(_bypassParamID);
+            if (p != _parametertree.end())
+            {
+              const auto &info = p->second->info();
+              bypassed = (e._data._value.value >= 0.5 * (info.min_value + info.max_value));
+            }
+          }
+          if (bypassed && *bypassed != _isBypassed)
+          {
+            _isBypassed = *bypassed;
+            PropertyChanged(kAudioUnitProperty_BypassEffect, kAudioUnitScope_Global, 0);
+          }
+        }
         AudioUnitEvent myEvent;
         myEvent.mEventType = kAudioUnitEvent_ParameterValueChange;
         myEvent.mArgument.mParameter.mAudioUnit = GetComponentInstance();
@@ -1332,57 +1503,49 @@ OSStatus WrapAsAUV2::RestoreState(CFPropertyListRef plist)
   return noErr;
 }
 
+bool WrapAsAUV2::isEffectFacade()
+{
+  // Both scopes are placeholder-only (no CLAP audio ports behind them, yet an AU
+  // element exists). PostConstructor only adds a placeholder input bus for effect
+  // component types, so this identifies an effect (aufx) facade for a plugin that
+  // declares no audio ports at all.
+  return _inputPortCache.empty() && _outputPortCache.empty() && Inputs().GetNumberOfElements() > 0 &&
+         Outputs().GetNumberOfElements() > 0;
+}
+
 bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,
                              const AudioStreamBasicDescription &inNewFormat)
 {
-  if (!_plugin->_ext._audioports)
-  {
-    return false;
-  }
-
-  // Logic Pro does not call this in the main thread - so we just pretend..
-  auto guarantee_mainthread = _plugin->AlwaysMainThread();
-
-  auto ap = _plugin->_ext._audioports;
-  auto pl = _plugin->_plugin;
-
-  if (inScope == kAudioUnitScope_Input)
-  {
-    auto numAudioInputs = ap->count(pl, true);
-    if (inElement >= numAudioInputs)
-    {
-      return false;
-    }
-    clap_audio_port_info inf;
-    ap->get(pl, inElement, true, &inf);
-    if (inNewFormat.mChannelsPerFrame == inf.channel_count)
-    {
-      // LOGINFO("In True");
-      return true;
-    }
-  }
-  else if (inScope == kAudioUnitScope_Output)
-  {
-    auto numAudioOutputs = ap->count(pl, false);
-    if (inElement >= numAudioOutputs)
-    {
-      return false;
-    }
-
-    clap_audio_port_info inf;
-    ap->get(pl, inElement, false, &inf);
-    if (inNewFormat.mChannelsPerFrame == inf.channel_count)
-    {
-      // LOGINFO("Out True");
-      return true;
-    }
-  }
-  else if (inScope == kAudioUnitScope_Global)
+  // Validate against the audio-port layout snapshotted at PostConstructor. We
+  // must NOT scan the CLAP audio-ports extension here: hosts (e.g. Logic, auval)
+  // call ValidFormat while the plugin is active, and CLAP only permits port
+  // scanning while deactivated.
+  if (inScope == kAudioUnitScope_Global)
   {
     return true;
   }
-  //LOGINFO("False");
-  return false;
+
+  const auto &cache = (inScope == kAudioUnitScope_Input) ? _inputPortCache : _outputPortCache;
+  if (inElement >= cache.size())
+  {
+    // A placeholder silent bus (input or output) added in PostConstructor has no
+    // CLAP port behind it. Only element 0 of a scope with no CLAP ports exists.
+    if (!(cache.empty() && inElement == 0)) return false;
+
+    // When BOTH scopes are placeholders the unit is an effect facade for a
+    // plugin that declares no audio ports at all (see PostConstructor). Advertise
+    // a fixed stereo layout and reject other channel counts, so auval / hosts
+    // treat it as a plain stereo unit and don't init it into inconsistent
+    // configurations. For a note device's lone silent output placeholder we stay
+    // permissive so hosts may freely set the sample rate / channel count on that
+    // unused bus (the channel count is all we gate here).
+    if (isEffectFacade())
+    {
+      return inNewFormat.mChannelsPerFrame == kPlaceholderFacadeChannels;
+    }
+    return true;
+  }
+  return inNewFormat.mChannelsPerFrame == cache[inElement].channelCount;
 }
 
 OSStatus WrapAsAUV2::ChangeStreamFormat(AudioUnitScope inScope, AudioUnitElement inElement,
@@ -1397,32 +1560,33 @@ OSStatus WrapAsAUV2::ChangeStreamFormat(AudioUnitScope inScope, AudioUnitElement
 
 UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
 {
-  if (cinfo.empty() && _plugin->_ext._audioports)
+  // Built from the PostConstructor snapshot rather than a live port scan (see
+  // ValidFormat) so this is safe to call while the plugin is active.
+  if (cinfo.empty() && isEffectFacade())
   {
-    auto ap = _plugin->_ext._audioports;
-    auto pl = _plugin->_plugin;
-    auto numAudioInputs = ap->count(pl, true);
-    auto numAudioOutputs = ap->count(pl, false);
-
+    // No CLAP audio ports at all: advertise the fixed stereo in/out layout of the
+    // placeholder busses so auval / hosts treat this as a plain stereo unit.
+    cinfo.emplace_back();
+    cinfo.back().inChannels = kPlaceholderFacadeChannels;
+    cinfo.back().outChannels = kPlaceholderFacadeChannels;
+  }
+  else if (cinfo.empty() && !_outputPortCache.empty())
+  {
     std::set<int> inSets, outSets;
 
     bool hasInMain{false};
-    for (int i = 0; i < numAudioInputs; ++i)
+    for (const auto &p : _inputPortCache)
     {
-      clap_audio_port_info inf;
-      ap->get(pl, i, true, &inf);
-      inSets.insert(inf.channel_count);
-      hasInMain |= (inf.flags & CLAP_AUDIO_PORT_IS_MAIN);
+      inSets.insert(p.channelCount);
+      hasInMain |= p.isMain;
     }
     if (!hasInMain) inSets.insert(0);
 
     bool hasOutMain{false};
-    for (int i = 0; i < numAudioOutputs; ++i)
+    for (const auto &p : _outputPortCache)
     {
-      clap_audio_port_info inf;
-      ap->get(pl, i, false, &inf);
-      outSets.insert(inf.channel_count);
-      hasOutMain |= (inf.flags & CLAP_AUDIO_PORT_IS_MAIN);
+      outSets.insert(p.channelCount);
+      hasOutMain |= p.isMain;
     }
     if (!hasOutMain) outSets.insert(0);
 
@@ -1463,8 +1627,9 @@ void WrapAsAUV2::PostConstructor()
     {
       clap_audio_port_info inf;
       ap->get(pl, i, true, &inf);
-      auto b = CFStringCreateWithCString(nullptr, inf.name, kCFStringEncodingUTF8);
-      Inputs().GetElement(i)->SetName(b);
+      _inputPortCache.push_back({inf.channel_count, (inf.flags & CLAP_AUDIO_PORT_IS_MAIN) != 0});
+      // SetNumberOfElements resets the bus, reapply the configuration.
+      addInputBus(i, &inf);
 
       /*
       AudioChannelLayout layout;
@@ -1481,8 +1646,9 @@ void WrapAsAUV2::PostConstructor()
     {
       clap_audio_port_info inf;
       ap->get(pl, i, false, &inf);
-      auto b = CFStringCreateWithCString(nullptr, inf.name, kCFStringEncodingUTF8);
-      Outputs().GetElement(i)->SetName(b);
+      _outputPortCache.push_back({inf.channel_count, (inf.flags & CLAP_AUDIO_PORT_IS_MAIN) != 0});
+      // SetNumberOfElements resets the bus, reapply the configuration.
+      addOutputBus(i, &inf);
 
       /*
       AudioChannelLayout layout;
@@ -1494,8 +1660,42 @@ void WrapAsAUV2::PostConstructor()
     }
     LOGINFO("[clap-wrapper] PostConstructor: Ins={} Outs={}", numAudioInputs, numAudioOutputs);
   }
-  // The else here would just set elements to 0,0 which is the default
-  // therefore leave it un-elsed
+
+  // A plugin can legitimately declare no audio output ports (a note effect such
+  // as an arpeggiator, or a plugin with no audio-ports extension at all). The AU
+  // model — and auval / Logic — still require at least one audio output element
+  // to exist, otherwise Initialize fails with kAudioUnitErr_InvalidElement.
+  // Present a placeholder silent output bus in that case; the CLAP is still told
+  // its true (zero) audio-port count during processing, so no buffers are handed
+  // to the plugin that it did not declare.
+  if (Outputs().GetNumberOfElements() == 0)
+  {
+    SetNumberOfElements(kAudioUnitScope_Output, 1);
+    Outputs().SetNumberOfElements(1);
+    Outputs().GetElement(0)->SetName(CFSTR("Output"));
+    LOGINFO("[clap-wrapper] PostConstructor: added placeholder silent output bus");
+  }
+
+  // Symmetric case for inputs: an effect with no audio input ports is not a valid
+  // AudioUnit — auval / Logic require an input element on which a format can be
+  // set, and reject the unit otherwise (e.g. a utility plugin that declares
+  // clap.audio-ports but reports zero ports in both directions). Present a
+  // placeholder silent input bus in that case. This must only be done for effect
+  // component types (aufx / aumf): instruments and generators (aumu) and note
+  // effects (aumi) legitimately have no audio input, and the AU type — not the
+  // presence of note ports — is what hosts key on (a generator has neither audio
+  // nor note input). As with the output, the CLAP is still told its true (zero)
+  // input-port count during processing, so no input buffers are handed to a
+  // plugin that did not declare them.
+  const auto auType = GetComponentDescription().componentType;
+  const bool isEffectType = (auType == kAudioUnitType_Effect) || (auType == kAudioUnitType_MusicEffect);
+  if (isEffectType && Inputs().GetNumberOfElements() == 0)
+  {
+    SetNumberOfElements(kAudioUnitScope_Input, 1);
+    Inputs().SetNumberOfElements(1);
+    Inputs().GetElement(0)->SetName(CFSTR("Input"));
+    LOGINFO("[clap-wrapper] PostConstructor: added placeholder silent input bus");
+  }
 }
 
 UInt32 WrapAsAUV2::GetAudioChannelLayout(AudioUnitScope scope, AudioUnitElement element,
@@ -1550,12 +1750,61 @@ void WrapAsAUV2::send(const Clap::AUv2::clap_multi_event_t &event)
       }
     }
     break;
+    case CLAP_EVENT_NOTE_EXPRESSION:
+    {
+      // Pressure maps to poly/channel aftertouch and tuning to pitch bend;
+      // expressions MIDI 1.0 cannot represent (volume/pan/vibrato/…) are dropped.
+      uint8_t bytes[3];
+      if (ClapWrapper::detail::shared::noteExpressionToMidi1(event.noteexpression, bytes) > 0)
+      {
+        auto portid = event.noteexpression.port_index;
+        for (auto &i : _midi_outports)
+        {
+          if (i->_info.id == portid)
+          {
+            i->addMIDI3Byte(bytes);
+            break;
+          }
+        }
+      }
+    }
+    break;
+    case CLAP_EVENT_MIDI_SYSEX:
+    {
+      const auto &sx = event.sysex;
+      auto portid = sx.port_index;
+      for (auto &i : _midi_outports)
+      {
+        if (i->_info.id == portid)
+        {
+          i->addSysEx(sx.buffer, sx.size);
+          break;
+        }
+      }
+    }
+    break;
+    case CLAP_EVENT_MIDI2:
+    {
+      // A plugin emitting raw UMP is rare. Down-convert MIDI 2.0 channel-voice
+      // to MIDI 1.0 and route through the normal output; this works for both the
+      // legacy callback and the UMP EventList path (which the framework then
+      // up-converts to the host's negotiated protocol).
+      uint8_t bytes[3];
+      if (ClapWrapper::detail::shared::midi2ChannelVoiceToMidi1(event.midi2.data, bytes) > 0)
+      {
+        auto portid = event.midi2.port_index;
+        for (auto &i : _midi_outports)
+        {
+          if (i->_info.id == portid)
+          {
+            i->addMIDI3Byte(bytes);
+            break;
+          }
+        }
+      }
+    }
+    break;
   }
-#if 0
-  MIDIEventList list;
-  MIDIEventListInit(list, MIDIProtocolID protocolkMIDIProtocol_1_0);
-  MIDIEventListAdd(list, <#ByteCount listSize#>, <#MIDIEventPacket * _Nonnull curPacket#>, <#MIDITimeStamp time#>, <#ByteCount wordCount#>, <#const UInt32 * _Nonnull words#>)
-#endif
 }
 
 }  // namespace free_audio::auv2_wrapper
