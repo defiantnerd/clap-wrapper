@@ -489,6 +489,16 @@ bool ComboBox::set(const std::string &searchString)
   return message.send(hwnd.get(), CB_GETCURSEL, 0, 0);
 }
 
+std::optional<size_t> ComboBox::selection(size_t containerSize)
+{
+  auto index{get()};
+
+  if (index == CB_ERR || index < 0) return std::nullopt;
+  if (static_cast<size_t>(index) >= containerSize) return std::nullopt;
+
+  return static_cast<size_t>(index);
+}
+
 ::LRESULT ComboBox::getItemHeight()
 {
   return message.send(hwnd.get(), CB_GETITEMHEIGHT, 0, 0);
@@ -877,75 +887,100 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
       {
         if (HIWORD(msg.wparam) == CBN_SELCHANGE)
         {
+          // Every one of these reads a combo selection and uses it as a vector
+          // index. CB_GETCURSEL returns -1 when nothing is selected, so each was
+          // an out-of-bounds read waiting for an empty or freshly-rebuilt combo.
+          // selection() yields nothing unless the index is real and in range.
           if (LOWORD(msg.wparam) == Settings::Identifier::AudioApi)
           {
-            selectAudioApi(sah->getCompiledApi()[settings.api.get()]);
+            auto apis{sah->getCompiledApi()};
 
-            refreshOutputs();
-            refreshInputs();
+            if (auto index{settings.api.selection(apis.size())}; index)
+            {
+              selectAudioApi(apis[*index]);
 
-            settings.output.set(sah->deviceName(sah->audioOutputDeviceID));
-            settings.input.set(sah->deviceName(sah->audioInputDeviceID));
+              refreshOutputs();
+              refreshInputs();
 
-            refreshSampleRates();
-            refreshBufferSizes();
+              settings.output.set(sah->deviceName(sah->audioOutputDeviceID));
+              settings.input.set(sah->deviceName(sah->audioInputDeviceID));
 
-            settings.sampleRate.set(std::to_string(sah->currentSampleRate));
-            settings.bufferSize.set(std::to_string(sah->currentBufferSize));
+              refreshSampleRates();
+              refreshBufferSizes();
 
-            saveSettings();
-            startAudio();
+              settings.sampleRate.set(std::to_string(sah->currentSampleRate));
+              settings.bufferSize.set(std::to_string(sah->currentBufferSize));
+
+              saveSettings();
+              startAudio();
+            }
           }
 
           if (LOWORD(msg.wparam) == Settings::Identifier::AudioOutput)
           {
-            sah->audioOutputDeviceID = sah->getOutputAudioDevices()[settings.output.get()].ID;
+            auto devices{sah->getOutputAudioDevices()};
 
-            sah->deviceOutputChannels =
-                sah->getOutputAudioDevices()[settings.output.get()].outputChannels;
+            if (auto index{settings.output.selection(devices.size())}; index)
+            {
+              sah->audioOutputDeviceID = devices[*index].ID;
+              sah->deviceOutputChannels = devices[*index].outputChannels;
+              sah->audioOutputUsed = true;
 
-            refreshSampleRates();
-            refreshBufferSizes();
+              refreshSampleRates();
+              refreshBufferSizes();
 
-            saveSettings();
-            startAudio();
+              saveSettings();
+              startAudio();
+            }
           }
 
           if (LOWORD(msg.wparam) == Settings::Identifier::AudioInput)
           {
-            sah->audioInputDeviceID = sah->getInputAudioDevices()[settings.input.get()].ID;
+            auto devices{sah->getInputAudioDevices()};
 
-            sah->deviceInputChannels = sah->getInputAudioDevices()[settings.input.get()].inputChannels;
+            if (auto index{settings.input.selection(devices.size())}; index)
+            {
+              sah->audioInputDeviceID = devices[*index].ID;
+              sah->deviceInputChannels = devices[*index].inputChannels;
+              sah->audioInputUsed = true;
 
-            refreshSampleRates();
-            refreshBufferSizes();
+              refreshSampleRates();
+              refreshBufferSizes();
 
-            saveSettings();
-            startAudio();
+              saveSettings();
+              startAudio();
+            }
           }
 
           if (LOWORD(msg.wparam) == Settings::Identifier::AudioSamplerate)
           {
-            auto sampleRates{sah->getInputAudioDevices()[settings.input.get()].sampleRates};
+            // This used to take the rate list from the *input* device vector,
+            // indexed by the input combo - so picking a sample rate read out of
+            // bounds whenever the current API had no input devices at all, which
+            // is routine for output-only ASIO drivers. The rates offered are the
+            // ones the stream can actually run at.
+            auto sampleRates{sah->getSampleRates()};
 
-            auto newRate{sampleRates[settings.sampleRate.get()]};
+            if (auto index{settings.sampleRate.selection(sampleRates.size())}; index)
+            {
+              sah->currentSampleRate = sampleRates[*index];
 
-            sah->currentSampleRate = newRate;
-
-            saveSettings();
-            startAudio();
+              saveSettings();
+              startAudio();
+            }
           }
 
           if (LOWORD(msg.wparam) == Settings::Identifier::AudioBuffersize)
           {
             auto bufferSizes{sah->getBufferSizes()};
 
-            auto bufferSize{bufferSizes[settings.bufferSize.get()]};
+            if (auto index{settings.bufferSize.selection(bufferSizes.size())}; index)
+            {
+              sah->currentBufferSize = bufferSizes[*index];
 
-            sah->currentBufferSize = bufferSize;
-
-            saveSettings();
-            startAudio();
+              saveSettings();
+              startAudio();
+            }
           }
         }
 

@@ -189,6 +189,12 @@ struct ComboBox final : public Control
   bool set(int index);
   bool set(const std::string &searchString);
   ::LRESULT get();
+
+  // get() returns CB_ERR (-1) when nothing is selected, which as a vector index is
+  // an out-of-bounds read. Callers index containers with this instead, and it is
+  // empty unless the selection is both present and in range.
+  std::optional<size_t> selection(size_t containerSize);
+
   ::LRESULT getItemHeight();
 
   static ::LRESULT CALLBACK procedure(::HWND hwnd, ::UINT msg, ::WPARAM wparam, ::LPARAM lparam,
