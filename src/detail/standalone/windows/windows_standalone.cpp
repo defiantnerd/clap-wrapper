@@ -78,29 +78,45 @@ bool isRectOnAnyMonitor(const Position &position)
   return ::MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) != nullptr;
 }
 
+/*
+ * The source length and the destination length are different quantities and both
+ * of these used to keep them in one variable: it started as the source length,
+ * was overwritten with the required destination length by the sizing call, and
+ * was then handed to the conversion call as the source length.
+ *
+ * For toUTF16 that silently truncated any multi-byte input, since the wide count
+ * is smaller than the byte count. For toUTF8 it read *past the end of the source*,
+ * because the UTF-8 form is longer than the UTF-16 form for anything non-ASCII.
+ *
+ * These run on the command line, every device name, every system error string,
+ * and the settings round trip, so on a non-English Windows they run constantly.
+ */
 std::wstring toUTF16(std::string_view input)
 {
-  std::wstring output;
+  if (input.empty()) return {};
 
-  if (input.length() > 0)
+  if (input.length() > static_cast<size_t>(std::numeric_limits<int>::max()))
   {
-    if (input.length() < std::numeric_limits<int>::max())
-    {
-      auto length{static_cast<int>(input.length())};
+    log("toUTF16(): String too long");
+    return {};
+  }
 
-      length = ::MultiByteToWideChar(CP_UTF8, 0, input.data(), length, nullptr, 0);
+  auto sourceLength{static_cast<int>(input.length())};
 
-      output.resize(length);
+  auto destinationLength{::MultiByteToWideChar(CP_UTF8, 0, input.data(), sourceLength, nullptr, 0)};
+  if (destinationLength <= 0)
+  {
+    log("toUTF16(): {}", getLastError());
+    return {};
+  }
 
-      if (::MultiByteToWideChar(CP_UTF8, 0, input.data(), length, output.data(), length) == 0)
-      {
-        log("toUTF16(): {}", getLastError());
-      }
-    }
-    else
-    {
-      log("toUTF16(): String too long");
-    }
+  std::wstring output(static_cast<size_t>(destinationLength), L'\0');
+
+  if (::MultiByteToWideChar(CP_UTF8, 0, input.data(), sourceLength, output.data(),
+                            destinationLength) == 0)
+  {
+    log("toUTF16(): {}", getLastError());
+    return {};
   }
 
   return output;
@@ -108,28 +124,31 @@ std::wstring toUTF16(std::string_view input)
 
 std::string toUTF8(std::wstring_view input)
 {
-  std::string output;
+  if (input.empty()) return {};
 
-  if (input.length() > 0)
+  if (input.length() > static_cast<size_t>(std::numeric_limits<int>::max()))
   {
-    if (input.length() < std::numeric_limits<int>::max())
-    {
-      auto length{static_cast<int>(input.length())};
+    log("toUTF8(): String too long");
+    return {};
+  }
 
-      length = ::WideCharToMultiByte(CP_UTF8, 0, input.data(), length, nullptr, 0, nullptr, nullptr);
+  auto sourceLength{static_cast<int>(input.length())};
 
-      output.resize(length);
+  auto destinationLength{
+      ::WideCharToMultiByte(CP_UTF8, 0, input.data(), sourceLength, nullptr, 0, nullptr, nullptr)};
+  if (destinationLength <= 0)
+  {
+    log("toUTF8(): {}", getLastError());
+    return {};
+  }
 
-      if (::WideCharToMultiByte(CP_UTF8, 0, input.data(), length, output.data(), length, nullptr,
-                                nullptr) == 0)
-      {
-        log("toUTF8(): {}", getLastError());
-      }
-    }
-    else
-    {
-      log("toUTF8(): String too long");
-    }
+  std::string output(static_cast<size_t>(destinationLength), '\0');
+
+  if (::WideCharToMultiByte(CP_UTF8, 0, input.data(), sourceLength, output.data(), destinationLength,
+                            nullptr, nullptr) == 0)
+  {
+    log("toUTF8(): {}", getLastError());
+    return {};
   }
 
   return output;
