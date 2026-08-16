@@ -563,15 +563,27 @@ void ListBox::add(const std::string &string)
   message.send(hwnd.get(), LB_ADDSTRING, 0, toUTF16(string).c_str());
 }
 
+// This is an LBS_MULTIPLESEL listbox, so the single-selection messages don't
+// apply to it: LB_SETCURSEL is documented as having no effect on a multi-select
+// listbox, and LB_GETCURSEL is not the way to read one. Using them meant a
+// restored multi-port MIDI selection could never be shown.
 bool ListBox::set(int index)
 {
-  return message.send(hwnd.get(), LB_SETCURSEL, index, 0) != CB_ERR ? true : false;
+  return message.send(hwnd.get(), LB_SETSEL, TRUE, index) != LB_ERR;
 }
 
 bool ListBox::set(const std::string &searchString)
 {
-  return message.send(hwnd.get(), LB_SELECTSTRING, -1, toUTF16(searchString).c_str()) != CB_ERR ? true
-                                                                                                : false;
+  auto index{message.send(hwnd.get(), LB_FINDSTRINGEXACT, -1, toUTF16(searchString).c_str())};
+
+  if (index == LB_ERR) return false;
+
+  return set(static_cast<int>(index));
+}
+
+void ListBox::clearSelection()
+{
+  message.send(hwnd.get(), LB_SETSEL, FALSE, -1);
 }
 
 ::LRESULT ListBox::get()
@@ -581,8 +593,19 @@ bool ListBox::set(const std::string &searchString)
 
 ::LRESULT ListBox::getItems(std::vector<int> &buffer)
 {
-  buffer.resize(getItemsCount());
-  return message.send(hwnd.get(), LB_GETSELITEMS, getItemsCount(), buffer.data());
+  auto count{getItemsCount()};
+
+  // LB_GETSELCOUNT answers LB_ERR (-1) on a single-selection listbox; resizing
+  // to that would be an enormous allocation rather than an empty list.
+  if (count == LB_ERR || count <= 0)
+  {
+    buffer.clear();
+    return 0;
+  }
+
+  buffer.resize(static_cast<size_t>(count));
+
+  return message.send(hwnd.get(), LB_GETSELITEMS, count, buffer.data());
 }
 
 ::LRESULT ListBox::getItemsCount()
@@ -1007,38 +1030,27 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
         {
           if (LOWORD(msg.wparam) == Settings::Identifier::MidiInputs)
           {
-            std::vector<int> ports;
-            settings.midiIn.getItems(ports);
+            std::vector<int> selected;
+            settings.midiIn.getItems(selected);
 
-            for (auto &midiIn : sah->midiIns)
-            {
-              midiIn.reset();
-            }
-            sah->midiIns.clear();
-            sah->currentMidiPorts.clear();
+            auto available{sah->getMidiPortNames()};
 
-            for (auto port : ports)
+            std::vector<std::string> chosen;
+            for (auto index : selected)
             {
-              if (ports.size() != 0)
+              if (index >= 0 && static_cast<size_t>(index) < available.size())
               {
-                try
-                {
-                  auto midiIn{std::make_unique<RtMidiIn>()};
-                  midiIn->openPort(port);
-                  midiIn->setCallback(sah->midiCallback, sah);
-                  sah->midiIns.push_back(std::move(midiIn));
-                  sah->currentMidiPorts.push_back(port);
-                }
-                catch (RtMidiError &error)
-                {
-                  log("{}", error.getMessage());
-                };
-              }
-              else
-              {
-                sah->stopMIDIThread();
+                chosen.push_back(available[index]);
               }
             }
+
+            sah->openMidiPorts(chosen, false);
+
+            // Record names, not indices: the index of a port changes as devices
+            // come and go. Once the user has touched the list we stop binding
+            // everything, so deselecting every port really does mean no MIDI in.
+            sah->settings.midiBindAllPorts = false;
+            sah->settings.midiPortNames = chosen;
 
             saveSettings();
           }
@@ -1380,11 +1392,31 @@ void Plugin::refreshMIDIInputs()
 {
   settings.midiIn.reset();
 
-  auto midiIn{std::make_unique<RtMidiIn>()};
+  auto available{sah->getMidiPortNames()};
 
-  for (uint32_t port{0}; port < sah->numMidiPorts; port++)
+  for (const auto &name : available)
   {
-    settings.midiIn.add(midiIn->getPortName(port));
+    settings.midiIn.add(name);
+  }
+
+  // Show what is actually open. The list used to be populated with nothing
+  // selected while every port was in fact bound, so the UI told the user the
+  // opposite of what was happening.
+  settings.midiIn.clearSelection();
+
+  if (sah->settings.midiBindAllPorts)
+  {
+    for (int index{0}; index < static_cast<int>(available.size()); ++index)
+    {
+      settings.midiIn.set(index);
+    }
+  }
+  else
+  {
+    for (const auto &name : sah->settings.midiPortNames)
+    {
+      settings.midiIn.set(name);
+    }
   }
 }
 
@@ -1417,18 +1449,6 @@ bool Plugin::loadSettings()
   }
 
   return true;
-}
-
-void Plugin::initializeMIDI()
-{
-  auto midiIn{std::make_unique<RtMidiIn>()};
-
-  sah->currentMidiPorts.clear();
-
-  for (uint32_t port{0}; port < sah->numMidiPorts; port++)
-  {
-    sah->currentMidiPorts.push_back(port);
-  }
 }
 
 void Plugin::startMIDI()

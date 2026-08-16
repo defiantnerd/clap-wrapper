@@ -267,6 +267,16 @@ struct StandaloneHost : Clap::IHost
   std::vector<std::unique_ptr<RtMidiIn>> midiIns;
   uint32_t numMidiPorts{0};
   std::vector<uint32_t> currentMidiPorts;
+  // Port names as the MIDI system reports them right now; also refreshes
+  // numMidiPorts. Returns empty (rather than throwing or exiting) when there is
+  // no usable MIDI system.
+  std::vector<std::string> getMidiPortNames();
+
+  // Close whatever is open and open exactly these, matched by name. bindAll
+  // ignores the list and opens everything - which is a different thing from an
+  // empty list, that being a user who deliberately wants no MIDI input.
+  void openMidiPorts(const std::vector<std::string> &names, bool bindAll);
+
   void startMIDIThread();
   void stopMIDIThread();
   void processMIDIEvents(double deltatime, std::vector<unsigned char> *message);

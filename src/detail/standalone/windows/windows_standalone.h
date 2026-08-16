@@ -209,6 +209,7 @@ struct ListBox final : public Control
 
   bool set(int index);
   bool set(const std::string &searchString);
+  void clearSelection();
   ::LRESULT get();
   ::LRESULT getItems(std::vector<int> &buffer);
   ::LRESULT getItemsCount();
@@ -290,7 +291,6 @@ struct Plugin final : public Window
   bool saveSettings();
   bool loadSettings();
 
-  void initializeMIDI();
   void startMIDI();
 
   // Startup takes exactly one of these: the persisted configuration if we have
