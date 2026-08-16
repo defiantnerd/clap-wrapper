@@ -46,7 +46,23 @@ int WINAPI wWinMain(HINSTANCE /* hInstance */, HINSTANCE /* hPrevInstance */, PW
   auto clapPlugin{freeaudio::clap_wrapper::standalone::mainCreatePlugin(
       entry, PLUGIN_ID, PLUGIN_INDEX, static_cast<int>(argv.size()), argv.data())};
 
-  freeaudio::clap_wrapper::standalone::windows_standalone::Plugin plugin{clapPlugin, nCmdShow};
+  if (!clapPlugin)
+  {
+    // The Plugin constructor dereferences this immediately, so a failed create
+    // used to be a null dereference rather than a message.
+    freeaudio::clap_wrapper::standalone::windows_standalone::MessageHandler{}.error(
+        "Unable to create the plugin. The CLAP was found but did not provide '" PLUGIN_ID "'.");
 
-  return freeaudio::clap_wrapper::standalone::windows_standalone::run();
+    return 4;
+  }
+
+  {
+    freeaudio::clap_wrapper::standalone::windows_standalone::Plugin plugin{clapPlugin, nCmdShow};
+
+    // Drop our own reference before the scope ends. The wrapper's shutdown runs
+    // from WM_DESTROY inside run(), and the CLAP must not outlive it.
+    clapPlugin.reset();
+
+    return freeaudio::clap_wrapper::standalone::windows_standalone::run();
+  }
 }

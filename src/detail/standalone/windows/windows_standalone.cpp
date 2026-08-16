@@ -799,6 +799,8 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
   message.on(WM_SYSCOMMAND,
              [this](Message msg)
              {
+               if (!sah) return 0;
+
                switch (msg.wparam)
                {
                  case Menu::Identifier::AudioMidiSettings:
@@ -927,6 +929,8 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
       WM_COMMAND,
       [this](Message msg)
       {
+        if (!sah) return 0;
+
         if (HIWORD(msg.wparam) == CBN_SELCHANGE)
         {
           // Every one of these reads a combo selection and uses it as a vector
@@ -1062,6 +1066,8 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
   message.on(WM_TIMER,
              [this](Message msg)
              {
+               if (!sah) return 0;
+
                if (msg.wparam == timerId)
                {
                  if (sah->callbackRequested.exchange(false))
@@ -1097,13 +1103,35 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
 
                if (isTimerRunning)
                {
-                 if (stopTimer(timerId))
+                 // KillTimer returns nonzero on success, so this used to log the
+                 // last error precisely when nothing had gone wrong.
+                 if (!stopTimer(timerId))
                  {
                    log(getLastError());
                  }
+                 isTimerRunning = false;
                }
 
+               // The settings window can still be handed messages after the host
+               // is gone, and every one of its handlers reads sah. Take it down
+               // while it is still safe to do so.
+               settings.hwnd.reset();
+
+               // Release our reference to the CLAP *before* mainFinish, which
+               // runs entry->deinit(). Holding it here meant the plugin object
+               // was destroyed after the entry it came from had been deinited -
+               // a spec violation, and a use-after-free of the library in the
+               // dynamically loaded case.
+               plugin.gui = nullptr;
+               plugin.state = nullptr;
+               plugin.plugin = nullptr;
+               plugin.clap.reset();
+
                freeaudio::clap_wrapper::standalone::mainFinish();
+
+               // mainFinish destroys the StandaloneHost, so this pointer is dead
+               // from here on.
+               sah = nullptr;
 
                quit();
 
@@ -1122,6 +1150,8 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
       WM_PAINT,
       [this](Message msg)
       {
+        if (!sah) return 0;
+
         ::PAINTSTRUCT ps;
         ::HDC hdc{::BeginPaint(msg.hwnd, &ps)};
 
@@ -1281,6 +1311,8 @@ std::optional<clap_gui_resize_hints> Plugin::getResizeHints()
 
 void Plugin::refreshLayout()
 {
+  if (!sah) return;
+
   settings.repaint();
 
   settings.api.refreshFont(settings.scale);
