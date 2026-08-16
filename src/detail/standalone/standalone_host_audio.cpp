@@ -13,6 +13,7 @@
 #pragma GCC diagnostic pop
 #endif
 
+#include <algorithm>
 #include <exception>
 
 #include "standalone_host.h"
@@ -34,16 +35,7 @@ int rtaCallback(void *outputBuffer, void *inputBuffer, unsigned int nBufferFrame
 
 void rtaErrorCallback(RtAudioErrorType errorType, const std::string &errorText)
 {
-  if (errorType != RTAUDIO_OUTPUT_UNDERFLOW && errorType != RTAUDIO_INPUT_OVERFLOW)
-  {
-    LOGINFO("[ERROR] RtAudio reports '{}' [{}]", errorText, (int)errorType);
-    auto ae = getStandaloneHost()->displayAudioError;
-    if (ae)
-    {
-      ae(errorText);
-    }
-  }
-  else
+  if (errorType == RTAUDIO_OUTPUT_UNDERFLOW || errorType == RTAUDIO_INPUT_OVERFLOW)
   {
     static bool reported = false;
     if (!reported)
@@ -51,6 +43,28 @@ void rtaErrorCallback(RtAudioErrorType errorType, const std::string &errorText)
       LOGINFO("[ERROR] RtAudio reports under/overflow '{}' [{}]", errorText, (int)errorType);
       reported = true;
     }
+    return;
+  }
+
+  LOGINFO("[ERROR] RtAudio reports '{}' [{}]", errorText, (int)errorType);
+
+  auto sh = getStandaloneHost();
+
+  // Everything is logged; deciding what to *show* is a separate question. RtAudio
+  // raises errors from device enumeration, not just from opening a stream, and we
+  // enumerate constantly while populating a settings panel. On a machine with no
+  // audio devices at all that meant one modal dialog per probe, stacked up on the
+  // message loop - which reads to the user as a hang, not as an error.
+  if (sh->audioErrorsAreSilent())
+  {
+    return;
+  }
+
+  auto ae = sh->displayAudioError;
+  if (ae)
+  {
+    LOGINFO("[ERROR] Surfacing to the user: '{}'", errorText);
+    ae(errorText);
   }
 }
 
@@ -65,18 +79,50 @@ void StandaloneHost::guaranteeRtAudioDAC()
 
 void StandaloneHost::setAudioApi(RtAudio::Api api)
 {
+  if (rtaDac && audioApi == api) return;
+
+  // Tear the old backend down completely before the new one is constructed.
+  // Constructing an RtAudio probes the backend's drivers, and some of those
+  // (ASIO above all) reach into process-global SDK state; doing that while the
+  // outgoing backend's realtime thread is still calling us is the WASAPI->ASIO
+  // crash. Destroying the old instance by assigning over it was worse still:
+  // no stop, no running=false handshake, and the isStreamRunning() guard in
+  // startAudioThreadOnImpl could not help because by then rtaDac already
+  // pointed at the new instance.
+  if (rtaDac)
+  {
+    stopAudioThread();
+    deactivatePlugin();
+    rtaDac.reset();
+  }
+
   rtaDac = std::make_unique<RtAudio>(api, &rtaErrorCallback);
-  audioApi = api;
-  audioApiName = rtaDac->getApiName(api);
-  audioApiDisplayName = rtaDac->getApiDisplayName(api);
+
+  // Record what RtAudio actually chose, not what we asked for. Asking for
+  // UNSPECIFIED means "you pick", and persisting that would re-run the probe
+  // (and possibly land somewhere else) on the next launch.
+  audioApi = rtaDac->getCurrentApi();
+  audioApiName = RtAudio::getApiName(audioApi);
+  audioApiDisplayName = RtAudio::getApiDisplayName(audioApi);
   rtaDac->showWarnings(true);
+
+  running = true;
+  finishedRunning = false;
 }
 
 std::tuple<unsigned int, unsigned int, int32_t> StandaloneHost::getDefaultAudioInOutSampleRate()
 {
   guaranteeRtAudioDAC();
+  SilenceAudioErrors silence(this);
+
   auto iid = rtaDac->getDefaultInputDevice();
   auto oid = rtaDac->getDefaultOutputDevice();
+
+  // With no output device attached RtAudio still returns a default id, and asking
+  // it for info raises an error the frontend may show to the user. Report a rate
+  // of 0 instead and let the caller decide what to do about having no output.
+  if (!isKnownDevice(oid)) return {iid, oid, 0};
+
   auto outInfo = rtaDac->getDeviceInfo(oid);
   auto sr = outInfo.currentSampleRate;
   if (sr < 1)
@@ -90,21 +136,28 @@ void StandaloneHost::startAudioThread()
 {
   try
   {
-    guaranteeRtAudioDAC();
-
-    if (startupAudioSet)
+    // Persisted configuration wins when we have some; otherwise take the system
+    // defaults. A frontend which drives the settings UI itself (Windows) applies
+    // them before it gets here and simply calls startAudioThreadOn directly.
+    if (loadStandaloneSettings())
     {
-      auto in = startAudioIn;
-      auto out = startAudioOut;
-      auto sr = startSampleRate;
-      startAudioThreadOn(in, 2, in > 0 && numAudioInputs > 0, out, 2, out > 0 && numAudioOutputs > 0,
-                         sr);
+      applyAudioSettings();
     }
     else
     {
+      guaranteeRtAudioDAC();
+
       auto [in, out, sr] = getDefaultAudioInOutSampleRate();
-      startAudioThreadOn(in, 2, numAudioInputs > 0, out, 2, numAudioOutputs > 0, sr);
+      audioInputDeviceID = in;
+      audioOutputDeviceID = out;
+      audioInputUsed = isKnownDevice(in);
+      audioOutputUsed = isKnownDevice(out);
+      currentSampleRate = sr;
     }
+
+    startAudioThreadOn(audioInputDeviceID, deviceInputChannels, audioInputUsed && numAudioInputs > 0,
+                       audioOutputDeviceID, deviceOutputChannels,
+                       audioOutputUsed && numAudioOutputs > 0, currentSampleRate);
   }
   catch (const std::exception &e)
   {
@@ -114,7 +167,7 @@ void StandaloneHost::startAudioThread()
   }
   catch (...)
   {
-    // winrt/COM errors don't derive from std::exception
+    // COM errors don't derive from std::exception
     LOGINFO("[ERROR] Unknown exception while setting up audio");
     if (displayAudioError) displayAudioError("Unknown error while setting up audio");
   }
@@ -150,26 +203,52 @@ std::vector<RtAudio::Api> StandaloneHost::getCompiledApi()
 std::vector<RtAudio::DeviceInfo> StandaloneHost::getInputAudioDevices()
 {
   guaranteeRtAudioDAC();
+  SilenceAudioErrors silence(this);
   return filterDevicesBy(rtaDac, [](auto &a) { return a.inputChannels > 0; });
 }
 
 std::vector<RtAudio::DeviceInfo> StandaloneHost::getOutputAudioDevices()
 {
   guaranteeRtAudioDAC();
+  SilenceAudioErrors silence(this);
   return filterDevicesBy(rtaDac, [](auto &a) { return a.outputChannels > 0; });
 }
 
 std::vector<int32_t> StandaloneHost::getSampleRates()
 {
   guaranteeRtAudioDAC();
+  SilenceAudioErrors silence(this);
 
   std::vector<int32_t> res;
 
-  auto samplesRates{rtaDac->getDeviceInfo(audioInputDeviceID).sampleRates};
+  // The rates the *stream* could run at: the output device's, narrowed to the
+  // input device's when both are going to be opened. This used to read the input
+  // device's rates only - even when input was unused, and even when the id named
+  // no device at all, which raised an RtAudio error the frontend then showed as
+  // a modal dialog.
+  const bool useOutput{audioOutputUsed && isKnownDevice(audioOutputDeviceID)};
+  const bool useInput{audioInputUsed && isKnownDevice(audioInputDeviceID)};
 
-  for (auto &sampleRate : rtaDac->getDeviceInfo(audioInputDeviceID).sampleRates)
+  if (!useOutput && !useInput) return res;
+
+  const auto primary{useOutput ? audioOutputDeviceID : audioInputDeviceID};
+  for (auto sampleRate : rtaDac->getDeviceInfo(primary).sampleRates)
   {
-    res.push_back(sampleRate);
+    res.push_back(static_cast<int32_t>(sampleRate));
+  }
+
+  if (useOutput && useInput)
+  {
+    auto inputRates{rtaDac->getDeviceInfo(audioInputDeviceID).sampleRates};
+
+    res.erase(std::remove_if(res.begin(), res.end(),
+                             [&inputRates](int32_t sampleRate)
+                             {
+                               return std::find(inputRates.begin(), inputRates.end(),
+                                                static_cast<unsigned int>(sampleRate)) ==
+                                      inputRates.end();
+                             }),
+              res.end());
   }
 
   return res;
@@ -179,7 +258,12 @@ std::vector<uint32_t> StandaloneHost::getBufferSizes()
 {
   guaranteeRtAudioDAC();
 
-  std::vector<uint32_t> res{16,  32,  48,  64,  96,  128,  144,  160,
+  // RtAudio has no way to ask a device what it supports; you find out by trying
+  // to open it, and openStream reports back what it actually granted. So this is
+  // a menu of plausible sizes, not a claim about the device. 16 used to head the
+  // list and was taken as the Windows first-run default, which is far too small
+  // to run reliably on any backend.
+  std::vector<uint32_t> res{32,  48,  64,  96,  128,  144,  160,
                             192, 224, 256, 480, 512, 1024, 2048, 4096};
   return res;
 }
@@ -217,20 +301,50 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
 {
   guaranteeRtAudioDAC();
 
-  if (rtaDac->isStreamRunning())
-  {
-    stopAudioThread();
-    running = true;
-    finishedRunning = false;
-  }
+  // activatePlugin below is what lets the callback back in, so there is no need
+  // to reset running/finishedRunning here.
+  stopAudioThread();
 
   audioInputDeviceID = inputDeviceID;
   audioInputUsed = useInput;
   audioOutputDeviceID = outputDeviceID;
   audioOutputUsed = useOutput;
 
-  auto dids = rtaDac->getDeviceIds();
-  auto dnms = rtaDac->getDeviceNames();
+  // Enumeration only - these exist to name the devices in the log below.
+  std::vector<unsigned int> dids;
+  std::vector<std::string> dnms;
+  {
+    SilenceAudioErrors silence(this);
+    dids = rtaDac->getDeviceIds();
+    dnms = rtaDac->getDeviceNames();
+  }
+
+  // getDeviceInfo() on an id RtAudio doesn't know raises an error through the
+  // error callback, which frontends put in front of the user as a modal dialog.
+  // That happens on entirely ordinary machines: a box with no capture device at
+  // all still reports a default input device id of 0, which is not a real device.
+  // So check before asking, and drop the side we cannot open rather than failing
+  // the whole stream.
+  if (useOutput && !isKnownDevice(outputDeviceID))
+  {
+    LOGINFO("[ERROR] Output device id {} is not present; no audio output", outputDeviceID);
+    useOutput = false;
+    audioOutputUsed = false;
+  }
+
+  if (useInput && !isKnownDevice(inputDeviceID))
+  {
+    LOGINFO("[WARNING] Input device id {} is not present; continuing without audio input",
+            inputDeviceID);
+    useInput = false;
+    audioInputUsed = false;
+  }
+
+  if (!useOutput && !useInput)
+  {
+    LOGINFO("[ERROR] Neither an input nor an output device is available; audio is not starting");
+    return;
+  }
 
   RtAudio::StreamParameters oParams;
   int32_t sampleRate{reqSampleRate};
@@ -281,18 +395,15 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
   RtAudio::StreamOptions options;
   options.flags = RTAUDIO_SCHEDULE_REALTIME;
 
-  /*
-   * RTAudio doesn't tell you what the possible frame sizes are but instead
-   * just tells you to try open stream with power of twos you want. So leave
-   * this for now at 256 and return to it shortly.
-   */
-  LOGINFO("[WARNING] Hardcoding frame size to 256 samples for now");
-
   if (currentBufferSize == 0)
   {
-    currentBufferSize = 256;
+    currentBufferSize = StandaloneSettings::defaultBufferSize;
   }
 
+  // openStream writes the size it actually granted back through this, which may
+  // not be what we asked for, so everything downstream - activation bounds, the
+  // settings we persist, the value shown in a settings panel - has to read it
+  // back rather than assume the request was honoured.
   if (rtaDac->openStream((useOutput) ? &oParams : nullptr, (useInput) ? &iParams : nullptr,
                          RTAUDIO_FLOAT32, sampleRate, &currentBufferSize, &rtaCallback, (void *)this,
                          &options))
@@ -301,6 +412,8 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
     rtaDac->closeStream();
     return;
   }
+
+  LOGDETAIL("RtAudio granted a buffer size of {} frames", currentBufferSize);
 
   if (!activatePlugin(sampleRate, 1, currentBufferSize * 2))
   {
@@ -344,29 +457,55 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
 
 void StandaloneHost::stopAudioThread()
 {
-  LOGINFO("Shutting down audio");
   if (!rtaDac) return;
 
   if (!rtaDac->isStreamRunning())
   {
+    // Nothing is running, but the stream may still be open from a failed start.
+    if (rtaDac->isStreamOpen()) rtaDac->closeStream();
+    return;
   }
-  else
+
+  LOGINFO("Shutting down audio");
+
+  if (!quiesceProcessing())
   {
-    running = false;
-
-    // bit of a hack. Wait until we get an ack from audio callback
-    for (auto i = 0; i < 10000 && !finishedRunning; ++i)
-    {
-      using namespace std::chrono_literals;
-      std::this_thread::sleep_for(1ms);
-    }
-
-    if (rtaDac && rtaDac->isStreamRunning())
-    {
-      rtaDac->stopStream();
-      rtaDac->closeStream();
-    }
+    // Shut the stream down anyway: leaving it running is strictly worse than
+    // closing one whose last callback we could not confirm.
+    LOGINFO("[ERROR] Audio callback did not acknowledge the stop; closing the stream regardless");
   }
-  return;
+
+  if (rtaDac->isStreamRunning())
+  {
+    rtaDac->stopStream();
+    rtaDac->closeStream();
+  }
+}
+
+bool StandaloneHost::quiesceProcessing()
+{
+  {
+    // Setting this under the lock means a callback either observes running==false
+    // for its whole pass, or completes the pass it had already begun. It cannot
+    // see the flag change mid-process().
+    ClapWrapper::detail::shared::SpinLockGuard g(processLock);
+    running = false;
+  }
+
+  if (!rtaDac || !rtaDac->isStreamRunning())
+  {
+    // No callback is going to run, so there is no ack coming and none needed.
+    return true;
+  }
+
+  // Wait for the callback to tell us it has seen the flag. A block can legitimately
+  // take a while at large buffer sizes, but two seconds means it is never coming.
+  using namespace std::chrono_literals;
+  for (auto i = 0; i < 2000 && !finishedRunning; ++i)
+  {
+    std::this_thread::sleep_for(1ms);
+  }
+
+  return finishedRunning;
 }
 }  // namespace freeaudio::clap_wrapper::standalone

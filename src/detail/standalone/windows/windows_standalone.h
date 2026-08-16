@@ -13,20 +13,12 @@
 #include <wil/com.h>
 #include <wil/resource.h>
 
-#include <winrt/windows.foundation.h>
-#include <winrt/windows.data.json.h>
-
 #define FMT_HEADER_ONLY 1
 #include <fmt/format.h>
 #include <fmt/xchar.h>
 
 #include "detail/standalone/entry.h"
 #include "detail/standalone/standalone_host.h"
-
-namespace winrt
-{
-using namespace winrt::Windows::Data::Json;
-};  // namespace winrt
 
 namespace freeaudio::clap_wrapper::standalone::windows_standalone
 {
@@ -134,16 +126,6 @@ struct Position
   uint32_t width{0};
   uint32_t height{0};
 };
-
-// Clamp a JSON-sourced double into int32 range before narrowing. Avoids UB when a
-// corrupt/out-of-range coordinate (e.g. a minimized window's -32000 sentinel that an
-// older build persisted as a huge unsigned value) is read back.
-inline int32_t jsonNumberToInt32(double value)
-{
-  if (value >= 2147483647.0) return 2147483647;
-  if (value <= -2147483648.0) return -2147483648;
-  return static_cast<int32_t>(value);
-}
 
 // True when the rectangle intersects a connected display.
 bool isRectOnAnyMonitor(const Position &position);
@@ -272,105 +254,12 @@ struct Plugin final : public Window
       MidiInputs
     };
 
-    template <typename T, typename U>
-    auto set(std::string_view key, U value) -> void
-    {
-      if constexpr (std::is_same_v<T, std::string>)
-      {
-        json.SetNamedValue(toUTF16(key), winrt::JsonValue::CreateStringValue(toUTF16(value)));
-      }
-
-      if constexpr (std::is_same_v<T, bool>)
-      {
-        json.SetNamedValue(toUTF16(key), winrt::JsonValue::CreateBooleanValue(value));
-      }
-
-      if constexpr (std::is_same_v<T, double>)
-      {
-        json.SetNamedValue(toUTF16(key), winrt::JsonValue::CreateNumberValue(value));
-      }
-
-      if constexpr (std::is_same_v<T, Position>)
-      {
-        auto pos{winrt::JsonObject()};
-        pos.SetNamedValue(L"x", winrt::JsonValue::CreateNumberValue(value.x));
-        pos.SetNamedValue(L"y", winrt::JsonValue::CreateNumberValue(value.y));
-        pos.SetNamedValue(L"width", winrt::JsonValue::CreateNumberValue(value.width));
-        pos.SetNamedValue(L"height", winrt::JsonValue::CreateNumberValue(value.height));
-        json.SetNamedValue(toUTF16(key), pos);
-      }
-    }
-
-    template <typename T>
-    auto get(std::string_view key) -> T
-    {
-      auto value{json.GetNamedValue(toUTF16(key), nullptr)};
-
-      if constexpr (std::is_same_v<T, std::string>)
-      {
-        if (value && value.ValueType() == winrt::JsonValueType::String)
-        {
-          return toUTF8(value.GetString());
-        }
-        else
-        {
-          return {};
-        }
-      }
-
-      if constexpr (std::is_same_v<T, bool>)
-      {
-        if (value && value.ValueType() == winrt::JsonValueType::Boolean)
-        {
-          return value.GetBoolean();
-        }
-        else
-        {
-          return false;
-        }
-      }
-
-      if constexpr (std::is_same_v<T, double>)
-      {
-        if (value && value.ValueType() == winrt::JsonValueType::Number)
-        {
-          return value.GetNumber();
-        }
-        else
-        {
-          return 0.0;
-        }
-      }
-
-      if constexpr (std::is_same_v<T, Position>)
-      {
-        if (value && value.ValueType() == winrt::JsonValueType::Object)
-        {
-          auto parsedPos{value.GetObject()};
-
-          Position buffer;
-          buffer.x = jsonNumberToInt32(parsedPos.GetNamedNumber(L"x"));
-          buffer.y = jsonNumberToInt32(parsedPos.GetNamedNumber(L"y"));
-          buffer.width = static_cast<uint32_t>(parsedPos.GetNamedNumber(L"width"));
-          buffer.height = static_cast<uint32_t>(parsedPos.GetNamedNumber(L"height"));
-
-          return buffer;
-        }
-        else
-        {
-          return {};
-        }
-      }
-    }
-
     ComboBox api;
     ComboBox output;
     ComboBox input;
     ComboBox sampleRate;
     ComboBox bufferSize;
     ListBox midiIn;
-
-    winrt::JsonObject json;
   };
 
   struct ClapPlugin
@@ -398,7 +287,20 @@ struct Plugin final : public Window
   void initializeMIDI();
   void startMIDI();
 
-  void initializeAudio(RtAudio::Api api = RtAudio::Api::WINDOWS_WASAPI);
+  // Startup takes exactly one of these: the persisted configuration if we have
+  // one, otherwise the machine's defaults. The old single initializeAudio() ran
+  // on both paths and overwrote everything loadSettings() had just restored.
+  void applyLoadedAudio();
+  void applyDefaultAudio();
+
+  // The user picked a different API in the settings panel: rebuild the RtAudio
+  // instance and take that API's default devices, since device ids from the
+  // previous API mean nothing under the new one.
+  void selectAudioApi(RtAudio::Api api);
+
+  void selectDefaultDevices();
+  void refreshDeviceChannelCounts();
+
   void startAudio();
 
   freeaudio::clap_wrapper::standalone::StandaloneHost *sah{

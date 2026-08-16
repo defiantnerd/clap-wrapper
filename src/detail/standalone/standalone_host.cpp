@@ -366,6 +366,147 @@ bool StandaloneHost::tryLoadStandaloneAndPluginSettings(const fs::path &fromDir,
   return true;
 }
 
+std::optional<fs::path> StandaloneHost::standaloneSettingsFile()
+{
+  if (!clapPlugin || !clapPlugin->_plugin || !clapPlugin->_plugin->desc) return std::nullopt;
+
+  auto base = getStandaloneSettingsPath();
+  if (!base.has_value()) return std::nullopt;
+
+  return *base / clapPlugin->_plugin->desc->id / "standalone-settings.conf";
+}
+
+bool StandaloneHost::loadStandaloneSettings()
+{
+  auto path = standaloneSettingsFile();
+  if (!path.has_value()) return false;
+
+  settingsLoaded = settings.load(*path);
+
+  return settingsLoaded;
+}
+
+bool StandaloneHost::saveStandaloneSettings()
+{
+  auto path = standaloneSettingsFile();
+  if (!path.has_value()) return false;
+
+  // The plugin-id directory is shared with the state blobs and usually exists by
+  // now, but a first run which never saved state has yet to create it.
+  try
+  {
+    fs::create_directories(path->parent_path());
+  }
+  catch (const fs::filesystem_error &e)
+  {
+    LOGINFO("[ERROR] Unable to create settings directory '{}': '{}'", path->parent_path().u8string(),
+            e.what());
+    return false;
+  }
+
+  return settings.save(*path);
+}
+
+void StandaloneHost::captureAudioSettings()
+{
+  settings.audioApiName = audioApiName;
+  settings.outputDeviceName = deviceName(audioOutputDeviceID);
+  settings.inputDeviceName = deviceName(audioInputDeviceID);
+  settings.audioOutputUsed = audioOutputUsed;
+  settings.audioInputUsed = audioInputUsed;
+  settings.sampleRate = currentSampleRate;
+  settings.bufferSize = currentBufferSize;
+}
+
+void StandaloneHost::applyAudioSettings()
+{
+  // The API has to be selected first: every device id below is an index into a
+  // particular RtAudio instance's enumeration, so that instance has to be the one
+  // we are about to open a stream on.
+  auto api = RtAudio::Api::UNSPECIFIED;
+  if (!settings.audioApiName.empty())
+  {
+    api = RtAudio::getCompiledApiByName(settings.audioApiName);
+    if (api == RtAudio::Api::UNSPECIFIED)
+    {
+      LOGINFO("[WARNING] Audio API '{}' is not available in this build; using the default",
+              settings.audioApiName);
+    }
+  }
+  setAudioApi(api);
+
+  audioOutputDeviceID = resolveOutputDevice(settings.outputDeviceName);
+  audioInputDeviceID = resolveInputDevice(settings.inputDeviceName);
+
+  // A machine with no capture device still reports a default input device id, so
+  // "did we get an id back" is not the question - "is it a real device" is.
+  audioOutputUsed = settings.audioOutputUsed && isKnownDevice(audioOutputDeviceID);
+  audioInputUsed = settings.audioInputUsed && isKnownDevice(audioInputDeviceID);
+
+  currentSampleRate = settings.sampleRate;
+  currentBufferSize = settings.bufferSize;
+}
+
+bool StandaloneHost::isKnownDevice(unsigned int deviceID)
+{
+  if (!rtaDac) return false;
+
+  SilenceAudioErrors silence(this);
+
+  for (auto id : rtaDac->getDeviceIds())
+  {
+    if (id == deviceID) return true;
+  }
+
+  return false;
+}
+
+std::string StandaloneHost::deviceName(unsigned int deviceID)
+{
+  if (!isKnownDevice(deviceID)) return {};
+
+  SilenceAudioErrors silence(this);
+
+  // Only ask once we know the id is real. getDeviceInfo() on an unknown id makes
+  // RtAudio raise an error through the error callback, which a frontend may well
+  // be putting in front of the user as a modal dialog.
+  return rtaDac->getDeviceInfo(deviceID).name;
+}
+
+unsigned int StandaloneHost::resolveInputDevice(const std::string &name)
+{
+  guaranteeRtAudioDAC();
+
+  if (!name.empty())
+  {
+    for (const auto &device : getInputAudioDevices())
+    {
+      if (device.name == name) return device.ID;
+    }
+
+    LOGINFO("[WARNING] Input device '{}' is not available; using the default", name);
+  }
+
+  return rtaDac->getDefaultInputDevice();
+}
+
+unsigned int StandaloneHost::resolveOutputDevice(const std::string &name)
+{
+  guaranteeRtAudioDAC();
+
+  if (!name.empty())
+  {
+    for (const auto &device : getOutputAudioDevices())
+    {
+      if (device.name == name) return device.ID;
+    }
+
+    LOGINFO("[WARNING] Output device '{}' is not available; using the default", name);
+  }
+
+  return rtaDac->getDefaultOutputDevice();
+}
+
 bool StandaloneHost::activatePlugin(int32_t sr, int32_t minBlock, int32_t maxBlock)
 {
   if (!clapPlugin) return false;
@@ -385,6 +526,14 @@ bool StandaloneHost::activatePlugin(int32_t sr, int32_t minBlock, int32_t maxBlo
   clapPlugin->start_processing();
   isProcessing = true;
 
+  // Only now let the callback back in. Taking the lock keeps a callback which is
+  // mid-pass from seeing running flip to true against a half-built state.
+  {
+    ClapWrapper::detail::shared::SpinLockGuard g(processLock);
+    finishedRunning = false;
+    running = true;
+  }
+
   return true;
 }
 
@@ -394,6 +543,13 @@ void StandaloneHost::deactivatePlugin()
   // know we activated. Without an audio device the plugin never gets activated
   // at all, and the shutdown path would otherwise deactivate it regardless.
   if (!clapPlugin || !isActive) return;
+
+  // Stop the callback and wait for it to say so before touching the plugin.
+  // Without this, any caller other than the Windows restart handler - an API
+  // switch, a device change, OK in a settings panel - could deactivate() while
+  // process() was in flight. Making the handshake part of deactivate is what
+  // stops each frontend from having to remember it.
+  quiesceProcessing();
 
   if (isProcessing)
   {

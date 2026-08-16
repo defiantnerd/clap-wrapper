@@ -9,6 +9,7 @@
 #include <tuple>
 
 #include "standalone_details.h"
+#include "standalone_settings.h"
 
 #include "detail/clap/fsutil.h"
 
@@ -127,6 +128,34 @@ struct StandaloneHost : Clap::IHost
 
   bool saveStandaloneAndPluginSettings(const fs::path &intoDir, const fs::path &withName);
   bool tryLoadStandaloneAndPluginSettings(const fs::path &fromDir, const fs::path &withName);
+
+  // The audio/MIDI configuration, as opposed to the plugin state blob above.
+  // Frontends read and write this rather than rolling their own store; see
+  // standalone_settings.h for the format and for why devices are held by name.
+  StandaloneSettings settings;
+  bool settingsLoaded{false};
+
+  // <settings path>/<plugin id>/standalone-settings.conf, or nullopt when the
+  // platform has no settings path or no plugin is loaded yet.
+  std::optional<fs::path> standaloneSettingsFile();
+  bool loadStandaloneSettings();
+  bool saveStandaloneSettings();
+
+  // Current audio configuration -> settings, and back. applyAudioSettings()
+  // selects the API and resolves the persisted device *names* against the
+  // devices this machine actually has right now.
+  void captureAudioSettings();
+  void applyAudioSettings();
+
+  // Device id for a persisted name, falling back to the system default when the
+  // name is empty or no longer present. Never throws, never fails.
+  unsigned int resolveInputDevice(const std::string &name);
+  unsigned int resolveOutputDevice(const std::string &name);
+
+  // True when RtAudio's current enumeration contains this id. Ask before calling
+  // getDeviceInfo(): an unknown id raises an error through the error callback.
+  bool isKnownDevice(unsigned int deviceID);
+  std::string deviceName(unsigned int deviceID);
 
   uint32_t numAudioInputs{0}, numAudioOutputs{0};
   std::vector<uint32_t> inputChannelByBus;
@@ -249,11 +278,36 @@ struct StandaloneHost : Clap::IHost
   // Actual audio IO In standalone_host_audio.cpp
   std::unique_ptr<RtAudio> rtaDac;
   std::function<void(const std::string &)> displayAudioError{nullptr};
+
+  // RtAudio reports enumeration failures through the same error callback it uses
+  // for stream failures, and we enumerate every time a settings panel refreshes.
+  // Those are not events to put in front of the user, so the enumeration helpers
+  // below silence the dialog for their duration. Logging is never silenced.
+  std::atomic<int> audioErrorSilence{0};
+  bool audioErrorsAreSilent() const
+  {
+    return audioErrorSilence.load() > 0;
+  }
+  struct SilenceAudioErrors
+  {
+    StandaloneHost *host;
+    explicit SilenceAudioErrors(StandaloneHost *h) : host(h)
+    {
+      host->audioErrorSilence.fetch_add(1);
+    }
+    ~SilenceAudioErrors()
+    {
+      host->audioErrorSilence.fetch_sub(1);
+    }
+  };
   RtAudio::Api audioApi{RtAudio::Api::UNSPECIFIED};
   std::string audioApiName{RtAudio::getApiName(RtAudio::Api::UNSPECIFIED)};
   std::string audioApiDisplayName{RtAudio::getApiDisplayName(RtAudio::Api::UNSPECIFIED)};
   unsigned int audioInputDeviceID{0}, audioOutputDeviceID{0};
   bool audioInputUsed{true}, audioOutputUsed{true};
+  // How many channels to ask the *device* for. Distinct from
+  // totalInput/OutputChannels above, which are the plugin's bus totals.
+  uint32_t deviceInputChannels{2}, deviceOutputChannels{2};
   int32_t currentSampleRate{0};
   uint32_t currentBufferSize{0};
   uint32_t currentInputChannels{0}, currentOutputChannels{0};
@@ -266,21 +320,15 @@ struct StandaloneHost : Clap::IHost
                           int32_t sampleRate);
   void stopAudioThread();
 
+  // Park the audio callback: clear running under processLock, then wait for the
+  // callback to acknowledge. Returns false if the acknowledgement never came.
+  // Callers which are about to touch plugin state must go through this.
+  bool quiesceProcessing();
+
   // the actual work of startAudioThreadOn, wrapped there by an exception guard
   void startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t inputChannels, bool useInput,
                               unsigned int outputDeviceID, uint32_t outputChannels, bool useOutput,
                               int32_t sampleRate);
-
-  bool startupAudioSet{false};
-  unsigned int startAudioIn{0}, startAudioOut{0};
-  int startSampleRate{0};
-  void setStartupAudio(unsigned int in, unsigned int out, int sr)
-  {
-    startupAudioSet = true;
-    startAudioIn = in;
-    startAudioOut = out;
-    startSampleRate = sr;
-  }
 
   // returns true if the plugin is activated and processing afterwards
   bool activatePlugin(int32_t sr, int32_t minBlock, int32_t maxBlock);

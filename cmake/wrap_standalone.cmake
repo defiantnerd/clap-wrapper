@@ -71,6 +71,7 @@ function(target_add_standalone_wrapper)
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/standalone_host.cpp
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/standalone_host_audio.cpp
             ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/standalone_host_midi.cpp
+            ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src/detail/standalone/standalone_settings.cpp
             )
     target_link_libraries(${salib}
             PUBLIC
@@ -166,7 +167,9 @@ function(target_add_standalone_wrapper)
             target_compile_definitions(${SA_TARGET} PRIVATE _SILENCE_CLANG_COROUTINE_MESSAGE)
         endif()
 
-        target_link_libraries(${SA_TARGET} PRIVATE base-sdk-wil ComCtl32.Lib RuntimeObject.Lib)
+        # RuntimeObject was only ever needed for the C++/WinRT JSON parser the
+        # settings code used to use; the shared settings store replaced it.
+        target_link_libraries(${SA_TARGET} PRIVATE base-sdk-wil ComCtl32.Lib)
 
     elseif(UNIX)
         target_sources(${SA_TARGET} PRIVATE

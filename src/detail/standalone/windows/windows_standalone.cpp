@@ -879,13 +879,13 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
         {
           if (LOWORD(msg.wparam) == Settings::Identifier::AudioApi)
           {
-            initializeAudio(sah->getCompiledApi()[settings.api.get()]);
+            selectAudioApi(sah->getCompiledApi()[settings.api.get()]);
 
             refreshOutputs();
             refreshInputs();
 
-            settings.output.set(sah->rtaDac->getDeviceInfo(sah->audioOutputDeviceID).name);
-            settings.input.set(sah->rtaDac->getDeviceInfo(sah->audioInputDeviceID).name);
+            settings.output.set(sah->deviceName(sah->audioOutputDeviceID));
+            settings.input.set(sah->deviceName(sah->audioInputDeviceID));
 
             refreshSampleRates();
             refreshBufferSizes();
@@ -901,7 +901,7 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
           {
             sah->audioOutputDeviceID = sah->getOutputAudioDevices()[settings.output.get()].ID;
 
-            sah->totalOutputChannels =
+            sah->deviceOutputChannels =
                 sah->getOutputAudioDevices()[settings.output.get()].outputChannels;
 
             refreshSampleRates();
@@ -915,7 +915,7 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
           {
             sah->audioInputDeviceID = sah->getInputAudioDevices()[settings.input.get()].ID;
 
-            sah->totalInputChannels = sah->getInputAudioDevices()[settings.input.get()].inputChannels;
+            sah->deviceInputChannels = sah->getInputAudioDevices()[settings.input.get()].inputChannels;
 
             refreshSampleRates();
             refreshBufferSizes();
@@ -1005,17 +1005,11 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
 
                  if (sah->restartRequested.exchange(false))
                  {
-                   // manually set running to false to make clapProcess a no-op
-                   // while the plugin is being reactivated. otherwise,
-                   // stopping and starting the entire audio engine is probably
-                   // overkill.
-                   {
-                     ClapWrapper::detail::shared::SpinLockGuard g(sah->processLock);
-                     sah->running = false;
-                   }
-                   // stay stopped if the plugin refused to reactivate
-                   sah->running =
-                       sah->activatePlugin(sah->currentSampleRate, 1, sah->currentBufferSize * 2);
+                   // Reactivate in place rather than bouncing the whole audio
+                   // engine. activatePlugin parks the callback, reactivates, and
+                   // only then lets processing resume - and leaves it stopped if
+                   // the plugin refuses to reactivate.
+                   sah->activatePlugin(sah->currentSampleRate, 1, sah->currentBufferSize * 2);
                  }
                }
 
@@ -1102,17 +1096,23 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
     log(getLastError());
   }
 
+  // Exactly one of these. The previous code called loadSettings() and then
+  // initializeAudio() unconditionally, and initializeAudio reset the device ids,
+  // mute state, sample rate and buffer size to hardware defaults - so everything
+  // that had just been restored was thrown away before it was ever used, and only
+  // the API name survived to the next launch.
   if (loadSettings())
   {
-    initializeAudio(sah->audioApi);
-    menu.item[1].fState = sah->audioInputUsed ? MFS_UNCHECKED : MFS_CHECKED;
-    SetMenuItemInfoW(getSystemMenu(hwnd.get()), 1, FALSE, &menu.item[1]);
+    applyLoadedAudio();
   }
   else
   {
-    initializeAudio();
+    applyDefaultAudio();
     saveSettings();
   }
+
+  menu.item[1].fState = sah->audioInputUsed ? MFS_UNCHECKED : MFS_CHECKED;
+  SetMenuItemInfoW(getSystemMenu(hwnd.get()), 1, FALSE, &menu.item[1]);
 
   if (plugin.gui)
   {
@@ -1182,8 +1182,12 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
   refreshBufferSizes();
 
   settings.api.set(sah->audioApiDisplayName);
-  settings.output.set(sah->rtaDac->getDeviceInfo(sah->audioOutputDeviceID).name);
-  settings.input.set(sah->rtaDac->getDeviceInfo(sah->audioInputDeviceID).name);
+  // deviceName() looks the id up through the device enumeration. Calling
+  // getDeviceInfo() with an id RtAudio doesn't recognise raises an error through
+  // the error callback, which by this point is wired to a modal message box -
+  // so a perfectly normal launch could greet the user with an error dialog.
+  settings.output.set(sah->deviceName(sah->audioOutputDeviceID));
+  settings.input.set(sah->deviceName(sah->audioInputDeviceID));
   settings.sampleRate.set(std::to_string(sah->currentSampleRate));
   settings.bufferSize.set(std::to_string(sah->currentBufferSize));
 
@@ -1332,75 +1336,33 @@ void Plugin::refreshMIDIInputs()
 
 bool Plugin::saveSettings()
 {
-  auto settingsPath{getStandaloneSettingsPath()};
+  if (!sah) return false;
 
-  if (settingsPath.has_value())
-  {
-    fs::create_directories(settingsPath.value() / plugin.plugin->desc->id);
+  sah->captureAudioSettings();
 
-    settings.set<std::string>("audioApiName", sah->audioApiName);
-    settings.set<double>("audioInputDeviceID", sah->audioInputDeviceID);
-    settings.set<double>("audioOutputDeviceID", sah->audioOutputDeviceID);
-    settings.set<bool>("audioInputUsed", sah->audioInputUsed);
-    settings.set<bool>("audioOutputUsed", sah->audioOutputUsed);
-    settings.set<double>("currentSampleRate", sah->currentSampleRate);
-    settings.set<double>("currentBufferSize", sah->currentBufferSize);
-    settings.set<Position>("position", position);
+  // Only offer a geometry back to the next launch once we have a real one.
+  sah->settings.hasWindowPosition = (position.width != 0 && position.height != 0);
+  sah->settings.windowX = position.x;
+  sah->settings.windowY = position.y;
+  sah->settings.windowWidth = position.width;
+  sah->settings.windowHeight = position.height;
 
-    auto settingsFilePath{settingsPath.value() / plugin.plugin->desc->id / "settings.json"};
-    std::wofstream file(settingsFilePath.c_str(), std::ios::binary | std::ios::out);
-
-    if (file.is_open())
-    {
-      auto serialized{settings.json.Stringify()};
-      file.write(serialized.c_str(), serialized.size());
-
-      return file ? true : false;
-    }
-  }
-
-  return false;
+  return sah->saveStandaloneSettings();
 }
 
 bool Plugin::loadSettings()
 {
-  auto settingsPath{getStandaloneSettingsPath()};
+  if (!sah || !sah->loadStandaloneSettings()) return false;
 
-  if (settingsPath.has_value())
+  if (sah->settings.hasWindowPosition)
   {
-    auto settingsFilePath{settingsPath.value() / plugin.plugin->desc->id / "settings.json"};
-    std::wifstream file(settingsFilePath.c_str(), std::ios::binary | std::ios::in);
-
-    if (file.is_open())
-    {
-      std::wstring buffer;
-      file.ignore(std::numeric_limits<std::streamsize>::max());
-      buffer.resize(file.gcount());
-      file.clear();
-      file.seekg(0, std::ios::beg);
-      file.read(buffer.data(), buffer.size());
-      if (auto parsed{settings.json.TryParse(buffer, settings.json)}; parsed)
-      {
-        sah->audioApiName = settings.get<std::string>("audioApiName");
-        // These are static on RtAudio - we run before any RtAudio instance exists,
-        // so they must not be reached through sah->rtaDac, which is still null here.
-        sah->audioApi = RtAudio::getCompiledApiByName(sah->audioApiName);
-        sah->audioApiDisplayName = RtAudio::getApiDisplayName(sah->audioApi);
-        sah->audioInputDeviceID = static_cast<unsigned int>(settings.get<double>("audioInputDeviceID"));
-        sah->audioOutputDeviceID =
-            static_cast<unsigned int>(settings.get<double>("audioOutputDeviceID"));
-        sah->audioInputUsed = settings.get<bool>("audioInputUsed");
-        sah->audioOutputUsed = settings.get<bool>("audioOutputUsed");
-        sah->currentSampleRate = static_cast<unsigned int>(settings.get<double>("currentSampleRate"));
-        sah->currentBufferSize = static_cast<unsigned int>(settings.get<double>("currentBufferSize"));
-        position = settings.get<Position>("position");
-
-        return parsed;
-      }
-    }
+    position.x = sah->settings.windowX;
+    position.y = sah->settings.windowY;
+    position.width = sah->settings.windowWidth;
+    position.height = sah->settings.windowHeight;
   }
 
-  return false;
+  return true;
 }
 
 void Plugin::initializeMIDI()
@@ -1420,28 +1382,63 @@ void Plugin::startMIDI()
   sah->startMIDIThread();
 }
 
-void Plugin::initializeAudio(RtAudio::Api api)
+void Plugin::refreshDeviceChannelCounts()
 {
-  sah->setAudioApi(api);
+  // How many channels to open the device with. Kept separate from the plugin's
+  // bus totals, which is what totalInput/OutputChannels means in the host.
+  for (const auto &device : sah->getOutputAudioDevices())
+  {
+    if (device.ID == sah->audioOutputDeviceID) sah->deviceOutputChannels = device.outputChannels;
+  }
 
+  for (const auto &device : sah->getInputAudioDevices())
+  {
+    if (device.ID == sah->audioInputDeviceID) sah->deviceInputChannels = device.inputChannels;
+  }
+}
+
+void Plugin::selectDefaultDevices()
+{
   auto [input, output, sampleRate]{sah->getDefaultAudioInOutSampleRate()};
 
+  // RtAudio hands back a default input device id even on a machine with no
+  // capture device at all, so take the id only if it names something real.
   sah->audioInputDeviceID = input;
-  sah->totalInputChannels = sah->rtaDac->getDeviceInfo(input).inputChannels;
-  sah->audioInputUsed = true;
+  sah->audioInputUsed = sah->isKnownDevice(input);
 
   sah->audioOutputDeviceID = output;
-  sah->totalOutputChannels = sah->rtaDac->getDeviceInfo(output).outputChannels;
-  sah->audioOutputUsed = true;
+  sah->audioOutputUsed = sah->isKnownDevice(output);
 
   sah->currentSampleRate = sampleRate;
-  sah->currentBufferSize = sah->getBufferSizes()[0];
+  sah->currentBufferSize = StandaloneSettings::defaultBufferSize;
+
+  refreshDeviceChannelCounts();
+}
+
+void Plugin::applyLoadedAudio()
+{
+  sah->applyAudioSettings();
+  refreshDeviceChannelCounts();
+}
+
+void Plugin::applyDefaultAudio()
+{
+  // WASAPI is the backend that is always present and always works on a stock
+  // Windows, so it is what a first run gets.
+  sah->setAudioApi(RtAudio::Api::WINDOWS_WASAPI);
+  selectDefaultDevices();
+}
+
+void Plugin::selectAudioApi(RtAudio::Api api)
+{
+  sah->setAudioApi(api);
+  selectDefaultDevices();
 }
 
 void Plugin::startAudio()
 {
-  sah->startAudioThreadOn(sah->audioInputDeviceID, sah->totalInputChannels, sah->audioInputUsed,
-                          sah->audioOutputDeviceID, sah->totalOutputChannels, sah->audioOutputUsed,
+  sah->startAudioThreadOn(sah->audioInputDeviceID, sah->deviceInputChannels, sah->audioInputUsed,
+                          sah->audioOutputDeviceID, sah->deviceOutputChannels, sah->audioOutputUsed,
                           sah->currentSampleRate);
 }
 }  // namespace freeaudio::clap_wrapper::standalone::windows_standalone
