@@ -156,7 +156,24 @@ struct StandaloneHost : Clap::IHost
   // getDeviceInfo(): an unknown id raises an error through the error callback.
   bool isKnownDevice(unsigned int deviceID);
   std::string deviceName(unsigned int deviceID);
+  RtAudio::DeviceInfo deviceInfoFor(unsigned int deviceID);
 
+  // Enumerating is not cheap and is not side-effect free. RtAudio's ASIO backend
+  // loads, ASIOInit()s and unloads *every* installed ASIO driver on each probe,
+  // and some drivers do not survive that being done repeatedly - the Generic Low
+  // Latency driver starts failing to allocate buffers. So the device list is
+  // enumerated once and reused until something happens that could change it.
+  const std::vector<RtAudio::DeviceInfo> &deviceList();
+  void invalidateDeviceList()
+  {
+    deviceListValid = false;
+  }
+
+ private:
+  std::vector<RtAudio::DeviceInfo> deviceListCache;
+  bool deviceListValid{false};
+
+ public:
   uint32_t numAudioInputs{0}, numAudioOutputs{0};
   std::vector<uint32_t> inputChannelByBus;
   std::vector<uint32_t> outputChannelByBus;

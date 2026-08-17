@@ -229,7 +229,27 @@ bool MessageHandler::contains(::UINT msg)
 
 ::LRESULT MessageHandler::invoke(Message message)
 {
-  return map.find(message.msg)->second({message.hwnd, message.msg, message.wparam, message.lparam});
+  // A C++ exception which escapes a window procedure does not unwind - the
+  // kernel terminates the process with STATUS_FATAL_USER_CALLBACK_EXCEPTION and
+  // no diagnostic at all. These handlers drive audio backends and third-party
+  // driver code, so contain what we can here; this is the one place every
+  // handler for both windows passes through. Note this catches C++ exceptions
+  // only: an access violation inside a driver is a structured exception and is
+  // still fatal, by design - there is nothing safe to continue to.
+  try
+  {
+    return map.find(message.msg)->second({message.hwnd, message.msg, message.wparam, message.lparam});
+  }
+  catch (const std::exception &e)
+  {
+    log("Unhandled exception in window message {}: {}", message.msg, e.what());
+  }
+  catch (...)
+  {
+    log("Unhandled exception in window message {}", message.msg);
+  }
+
+  return 0;
 }
 
 void MessageHandler::box(const std::string &message)
@@ -1267,8 +1287,40 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
   startMIDI();
   refreshMIDIInputs();
 
+  // Never put the message box up from here. RtAudio calls this from wherever the
+  // failure happened - including from inside the combo-box handler that asked for
+  // the device change, and from its own stream threads. A modal box runs a nested
+  // message loop, so showing one there re-enters the handler that is still on the
+  // stack. Queue the text and let the main loop show it once it is idle.
   sah->displayAudioError = [this](auto &errorText)
-  { message.error("Unable to configure audio: {}", errorText); };
+  {
+    {
+      std::lock_guard<std::mutex> guard(pendingErrorLock);
+
+      // Repeats are the norm: one failure typically reports through several
+      // layers, and nobody wants that dialog twice.
+      if (pendingError == errorText || errorText == lastShownError) return;
+      pendingError = errorText;
+    }
+
+    ::PostMessageW(hwnd.get(), WM_SHOW_AUDIO_ERROR, 0, 0);
+  };
+
+  message.on(WM_SHOW_AUDIO_ERROR,
+             [this](Message msg)
+             {
+               std::string text;
+               {
+                 std::lock_guard<std::mutex> guard(pendingErrorLock);
+                 text = pendingError;
+                 pendingError.clear();
+                 lastShownError = text;
+               }
+
+               if (!text.empty()) message.error("Unable to configure audio: {}", text);
+
+               return 0;
+             });
 
   refreshApis();
   refreshOutputs();

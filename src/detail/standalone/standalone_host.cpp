@@ -451,26 +451,35 @@ bool StandaloneHost::isKnownDevice(unsigned int deviceID)
 {
   if (!rtaDac) return false;
 
-  SilenceAudioErrors silence(this);
-
-  for (auto id : rtaDac->getDeviceIds())
+  for (const auto &device : deviceList())
   {
-    if (id == deviceID) return true;
+    if (device.ID == deviceID) return true;
   }
 
   return false;
 }
 
+RtAudio::DeviceInfo StandaloneHost::deviceInfoFor(unsigned int deviceID)
+{
+  for (const auto &device : deviceList())
+  {
+    if (device.ID == deviceID) return device;
+  }
+
+  return {};
+}
+
 std::string StandaloneHost::deviceName(unsigned int deviceID)
 {
-  if (!isKnownDevice(deviceID)) return {};
+  // Answer from the cached enumeration rather than getDeviceInfo(): an id RtAudio
+  // does not recognise raises an error through the error callback, which a
+  // frontend may well be putting in front of the user as a modal dialog.
+  for (const auto &device : deviceList())
+  {
+    if (device.ID == deviceID) return device.name;
+  }
 
-  SilenceAudioErrors silence(this);
-
-  // Only ask once we know the id is real. getDeviceInfo() on an unknown id makes
-  // RtAudio raise an error through the error callback, which a frontend may well
-  // be putting in front of the user as a modal dialog.
-  return rtaDac->getDeviceInfo(deviceID).name;
+  return {};
 }
 
 unsigned int StandaloneHost::resolveInputDevice(const std::string &name)

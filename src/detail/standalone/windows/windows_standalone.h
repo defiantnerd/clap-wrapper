@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -229,6 +230,10 @@ struct SystemMenu
   std::vector<::MENUITEMINFOW> item;
 };
 
+// Posted to the plugin window to show a queued audio error from the main loop
+// rather than from inside whatever handler or backend thread produced it.
+constexpr ::UINT WM_SHOW_AUDIO_ERROR{WM_APP + 1};
+
 struct Plugin final : public Window
 {
   struct Menu final : public SystemMenu
@@ -316,6 +321,11 @@ struct Plugin final : public Window
 
   bool isTimerRunning{false};
   const ::UINT_PTR timerId{0};
+
+  // Written from RtAudio's error callback, which can be any thread.
+  std::mutex pendingErrorLock;
+  std::string pendingError;
+  std::string lastShownError;
 
   ClapPlugin plugin;
   Position position;

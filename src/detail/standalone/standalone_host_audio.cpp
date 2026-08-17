@@ -96,6 +96,10 @@ void StandaloneHost::setAudioApi(RtAudio::Api api)
     rtaDac.reset();
   }
 
+  // Device ids belong to the instance that enumerated them, so the cached list
+  // means nothing once the backend changes.
+  invalidateDeviceList();
+
   rtaDac = std::make_unique<RtAudio>(api, &rtaErrorCallback);
 
   // Record what RtAudio actually chose, not what we asked for. Asking for
@@ -173,15 +177,12 @@ void StandaloneHost::startAudioThread()
   }
 }
 
-std::vector<RtAudio::DeviceInfo> filterDevicesBy(const std::unique_ptr<RtAudio> &rtaDac,
+std::vector<RtAudio::DeviceInfo> filterDevicesBy(const std::vector<RtAudio::DeviceInfo> &devices,
                                                  std::function<bool(const RtAudio::DeviceInfo &)> f)
 {
   std::vector<RtAudio::DeviceInfo> res;
-  auto dids = rtaDac->getDeviceIds();
-  auto dnms = rtaDac->getDeviceNames();
-  for (auto d : dids)
+  for (const auto &inf : devices)
   {
-    auto inf = rtaDac->getDeviceInfo(d);
     if (f(inf))
     {
       res.push_back(inf);
@@ -200,18 +201,34 @@ std::vector<RtAudio::Api> StandaloneHost::getCompiledApi()
   return compiledApi;
 }
 
-std::vector<RtAudio::DeviceInfo> StandaloneHost::getInputAudioDevices()
+const std::vector<RtAudio::DeviceInfo> &StandaloneHost::deviceList()
 {
   guaranteeRtAudioDAC();
-  SilenceAudioErrors silence(this);
-  return filterDevicesBy(rtaDac, [](auto &a) { return a.inputChannels > 0; });
+
+  if (!deviceListValid)
+  {
+    SilenceAudioErrors silence(this);
+
+    deviceListCache.clear();
+    for (auto id : rtaDac->getDeviceIds())
+    {
+      deviceListCache.push_back(rtaDac->getDeviceInfo(id));
+    }
+
+    deviceListValid = true;
+  }
+
+  return deviceListCache;
+}
+
+std::vector<RtAudio::DeviceInfo> StandaloneHost::getInputAudioDevices()
+{
+  return filterDevicesBy(deviceList(), [](auto &a) { return a.inputChannels > 0; });
 }
 
 std::vector<RtAudio::DeviceInfo> StandaloneHost::getOutputAudioDevices()
 {
-  guaranteeRtAudioDAC();
-  SilenceAudioErrors silence(this);
-  return filterDevicesBy(rtaDac, [](auto &a) { return a.outputChannels > 0; });
+  return filterDevicesBy(deviceList(), [](auto &a) { return a.outputChannels > 0; });
 }
 
 std::vector<int32_t> StandaloneHost::getSampleRates()
@@ -226,20 +243,29 @@ std::vector<int32_t> StandaloneHost::getSampleRates()
   // device's rates only - even when input was unused, and even when the id named
   // no device at all, which raised an RtAudio error the frontend then showed as
   // a modal dialog.
+  auto ratesOf = [this](unsigned int deviceID)
+  {
+    for (const auto &device : deviceList())
+    {
+      if (device.ID == deviceID) return device.sampleRates;
+    }
+    return std::vector<unsigned int>{};
+  };
+
   const bool useOutput{audioOutputUsed && isKnownDevice(audioOutputDeviceID)};
   const bool useInput{audioInputUsed && isKnownDevice(audioInputDeviceID)};
 
   if (!useOutput && !useInput) return res;
 
   const auto primary{useOutput ? audioOutputDeviceID : audioInputDeviceID};
-  for (auto sampleRate : rtaDac->getDeviceInfo(primary).sampleRates)
+  for (auto sampleRate : ratesOf(primary))
   {
     res.push_back(static_cast<int32_t>(sampleRate));
   }
 
   if (useOutput && useInput)
   {
-    auto inputRates{rtaDac->getDeviceInfo(audioInputDeviceID).sampleRates};
+    auto inputRates{ratesOf(audioInputDeviceID)};
 
     res.erase(std::remove_if(res.begin(), res.end(),
                              [&inputRates](int32_t sampleRate)
@@ -309,15 +335,6 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
   audioOutputDeviceID = outputDeviceID;
   audioOutputUsed = useOutput;
 
-  // Enumeration only - these exist to name the devices in the log below.
-  std::vector<unsigned int> dids;
-  std::vector<std::string> dnms;
-  {
-    SilenceAudioErrors silence(this);
-    dids = rtaDac->getDeviceIds();
-    dnms = rtaDac->getDeviceNames();
-  }
-
   // getDeviceInfo() on an id RtAudio doesn't know raises an error through the
   // error callback, which frontends put in front of the user as a modal dialog.
   // That happens on entirely ordinary machines: a box with no capture device at
@@ -347,11 +364,12 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
 
   RtAudio::StreamParameters oParams;
   int32_t sampleRate{reqSampleRate};
+  RtAudio::DeviceInfo outInfo, inInfo;
 
   if (useOutput)
   {
     oParams.deviceId = outputDeviceID;
-    auto outInfo = rtaDac->getDeviceInfo(oParams.deviceId);
+    outInfo = deviceInfoFor(outputDeviceID);
     oParams.nChannels = std::min(outputChannels, outInfo.outputChannels);
     oParams.firstChannel = 0;
     if (sampleRate < 0)
@@ -377,7 +395,7 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
   if (useInput)
   {
     iParams.deviceId = inputDeviceID;
-    auto inInfo = rtaDac->getDeviceInfo(iParams.deviceId);
+    inInfo = deviceInfoFor(inputDeviceID);
     iParams.nChannels = std::min(inputChannels, inInfo.inputChannels);
     iParams.firstChannel = 0;
     if (sampleRate < 0) sampleRate = inInfo.preferredSampleRate;
@@ -421,24 +439,15 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
     return;
   }
 
-  LOGDETAIL("RtAudio Attached Devices");
   if (useOutput)
   {
-    for (auto i = 0U; i < dids.size(); ++i)
-    {
-      if (oParams.deviceId == dids[i]) LOGDETAIL("  - Output : '{}'", dnms[i]);
-    }
     currentOutputChannels = oParams.nChannels;
-    LOGDETAIL("RtAudio Output Stream Channels {}", oParams.nChannels);
+    LOGDETAIL("RtAudio output : '{}', {} channels", outInfo.name, oParams.nChannels);
   }
   if (useInput)
   {
-    for (auto i = 0U; i < dids.size(); ++i)
-    {
-      if (iParams.deviceId == dids[i]) LOGDETAIL("  - Input : '{}'", dnms[i]);
-    }
     currentInputChannels = iParams.nChannels;
-    LOGDETAIL("RtAudio Input Stream Channels {}", iParams.nChannels);
+    LOGDETAIL("RtAudio input : '{}', {} channels", inInfo.name, iParams.nChannels);
   }
 
   if (!rtaDac->isStreamOpen())
