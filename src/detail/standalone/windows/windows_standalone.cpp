@@ -112,8 +112,8 @@ std::wstring toUTF16(std::string_view input)
 
   std::wstring output(static_cast<size_t>(destinationLength), L'\0');
 
-  if (::MultiByteToWideChar(CP_UTF8, 0, input.data(), sourceLength, output.data(),
-                            destinationLength) == 0)
+  if (::MultiByteToWideChar(CP_UTF8, 0, input.data(), sourceLength, output.data(), destinationLength) ==
+      0)
   {
     log("toUTF16(): {}", getLastError());
     return {};
@@ -925,143 +925,142 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
                return 0;
              });
 
-  settings.message.on(
-      WM_COMMAND,
-      [this](Message msg)
-      {
-        if (!sah) return 0;
+  settings.message.on(WM_COMMAND,
+                      [this](Message msg)
+                      {
+                        if (!sah) return 0;
 
-        if (HIWORD(msg.wparam) == CBN_SELCHANGE)
-        {
-          // Every one of these reads a combo selection and uses it as a vector
-          // index. CB_GETCURSEL returns -1 when nothing is selected, so each was
-          // an out-of-bounds read waiting for an empty or freshly-rebuilt combo.
-          // selection() yields nothing unless the index is real and in range.
-          if (LOWORD(msg.wparam) == Settings::Identifier::AudioApi)
-          {
-            auto apis{sah->getCompiledApi()};
+                        if (HIWORD(msg.wparam) == CBN_SELCHANGE)
+                        {
+                          // Every one of these reads a combo selection and uses it as a vector
+                          // index. CB_GETCURSEL returns -1 when nothing is selected, so each was
+                          // an out-of-bounds read waiting for an empty or freshly-rebuilt combo.
+                          // selection() yields nothing unless the index is real and in range.
+                          if (LOWORD(msg.wparam) == Settings::Identifier::AudioApi)
+                          {
+                            auto apis{sah->getCompiledApi()};
 
-            if (auto index{settings.api.selection(apis.size())}; index)
-            {
-              selectAudioApi(apis[*index]);
+                            if (auto index{settings.api.selection(apis.size())}; index)
+                            {
+                              selectAudioApi(apis[*index]);
 
-              refreshOutputs();
-              refreshInputs();
+                              refreshOutputs();
+                              refreshInputs();
 
-              settings.output.set(sah->deviceName(sah->audioOutputDeviceID));
-              settings.input.set(sah->deviceName(sah->audioInputDeviceID));
+                              settings.output.set(sah->deviceName(sah->audioOutputDeviceID));
+                              settings.input.set(sah->deviceName(sah->audioInputDeviceID));
 
-              refreshSampleRates();
-              refreshBufferSizes();
+                              refreshSampleRates();
+                              refreshBufferSizes();
 
-              settings.sampleRate.set(std::to_string(sah->currentSampleRate));
-              settings.bufferSize.set(std::to_string(sah->currentBufferSize));
+                              settings.sampleRate.set(std::to_string(sah->currentSampleRate));
+                              settings.bufferSize.set(std::to_string(sah->currentBufferSize));
 
-              saveSettings();
-              startAudio();
-            }
-          }
+                              saveSettings();
+                              startAudio();
+                            }
+                          }
 
-          if (LOWORD(msg.wparam) == Settings::Identifier::AudioOutput)
-          {
-            auto devices{sah->getOutputAudioDevices()};
+                          if (LOWORD(msg.wparam) == Settings::Identifier::AudioOutput)
+                          {
+                            auto devices{sah->getOutputAudioDevices()};
 
-            if (auto index{settings.output.selection(devices.size())}; index)
-            {
-              sah->audioOutputDeviceID = devices[*index].ID;
-              sah->deviceOutputChannels = devices[*index].outputChannels;
-              sah->audioOutputUsed = true;
+                            if (auto index{settings.output.selection(devices.size())}; index)
+                            {
+                              sah->audioOutputDeviceID = devices[*index].ID;
+                              sah->deviceOutputChannels = devices[*index].outputChannels;
+                              sah->audioOutputUsed = true;
 
-              refreshSampleRates();
-              refreshBufferSizes();
+                              refreshSampleRates();
+                              refreshBufferSizes();
 
-              saveSettings();
-              startAudio();
-            }
-          }
+                              saveSettings();
+                              startAudio();
+                            }
+                          }
 
-          if (LOWORD(msg.wparam) == Settings::Identifier::AudioInput)
-          {
-            auto devices{sah->getInputAudioDevices()};
+                          if (LOWORD(msg.wparam) == Settings::Identifier::AudioInput)
+                          {
+                            auto devices{sah->getInputAudioDevices()};
 
-            if (auto index{settings.input.selection(devices.size())}; index)
-            {
-              sah->audioInputDeviceID = devices[*index].ID;
-              sah->deviceInputChannels = devices[*index].inputChannels;
-              sah->audioInputUsed = true;
+                            if (auto index{settings.input.selection(devices.size())}; index)
+                            {
+                              sah->audioInputDeviceID = devices[*index].ID;
+                              sah->deviceInputChannels = devices[*index].inputChannels;
+                              sah->audioInputUsed = true;
 
-              refreshSampleRates();
-              refreshBufferSizes();
+                              refreshSampleRates();
+                              refreshBufferSizes();
 
-              saveSettings();
-              startAudio();
-            }
-          }
+                              saveSettings();
+                              startAudio();
+                            }
+                          }
 
-          if (LOWORD(msg.wparam) == Settings::Identifier::AudioSamplerate)
-          {
-            // This used to take the rate list from the *input* device vector,
-            // indexed by the input combo - so picking a sample rate read out of
-            // bounds whenever the current API had no input devices at all, which
-            // is routine for output-only ASIO drivers. The rates offered are the
-            // ones the stream can actually run at.
-            auto sampleRates{sah->getSampleRates()};
+                          if (LOWORD(msg.wparam) == Settings::Identifier::AudioSamplerate)
+                          {
+                            // This used to take the rate list from the *input* device vector,
+                            // indexed by the input combo - so picking a sample rate read out of
+                            // bounds whenever the current API had no input devices at all, which
+                            // is routine for output-only ASIO drivers. The rates offered are the
+                            // ones the stream can actually run at.
+                            auto sampleRates{sah->getSampleRates()};
 
-            if (auto index{settings.sampleRate.selection(sampleRates.size())}; index)
-            {
-              sah->currentSampleRate = sampleRates[*index];
+                            if (auto index{settings.sampleRate.selection(sampleRates.size())}; index)
+                            {
+                              sah->currentSampleRate = sampleRates[*index];
 
-              saveSettings();
-              startAudio();
-            }
-          }
+                              saveSettings();
+                              startAudio();
+                            }
+                          }
 
-          if (LOWORD(msg.wparam) == Settings::Identifier::AudioBuffersize)
-          {
-            auto bufferSizes{sah->getBufferSizes()};
+                          if (LOWORD(msg.wparam) == Settings::Identifier::AudioBuffersize)
+                          {
+                            auto bufferSizes{sah->getBufferSizes()};
 
-            if (auto index{settings.bufferSize.selection(bufferSizes.size())}; index)
-            {
-              sah->currentBufferSize = bufferSizes[*index];
+                            if (auto index{settings.bufferSize.selection(bufferSizes.size())}; index)
+                            {
+                              sah->currentBufferSize = bufferSizes[*index];
 
-              saveSettings();
-              startAudio();
-            }
-          }
-        }
+                              saveSettings();
+                              startAudio();
+                            }
+                          }
+                        }
 
-        if (HIWORD(msg.wparam) == LBN_SELCHANGE)
-        {
-          if (LOWORD(msg.wparam) == Settings::Identifier::MidiInputs)
-          {
-            std::vector<int> selected;
-            settings.midiIn.getItems(selected);
+                        if (HIWORD(msg.wparam) == LBN_SELCHANGE)
+                        {
+                          if (LOWORD(msg.wparam) == Settings::Identifier::MidiInputs)
+                          {
+                            std::vector<int> selected;
+                            settings.midiIn.getItems(selected);
 
-            auto available{sah->getMidiPortNames()};
+                            auto available{sah->getMidiPortNames()};
 
-            std::vector<std::string> chosen;
-            for (auto index : selected)
-            {
-              if (index >= 0 && static_cast<size_t>(index) < available.size())
-              {
-                chosen.push_back(available[index]);
-              }
-            }
+                            std::vector<std::string> chosen;
+                            for (auto index : selected)
+                            {
+                              if (index >= 0 && static_cast<size_t>(index) < available.size())
+                              {
+                                chosen.push_back(available[index]);
+                              }
+                            }
 
-            sah->openMidiPorts(chosen, false);
+                            sah->openMidiPorts(chosen, false);
 
-            // Record names, not indices: the index of a port changes as devices
-            // come and go. Once the user has touched the list we stop binding
-            // everything, so deselecting every port really does mean no MIDI in.
-            sah->settings.midiBindAllPorts = false;
-            sah->settings.midiPortNames = chosen;
+                            // Record names, not indices: the index of a port changes as devices
+                            // come and go. Once the user has touched the list we stop binding
+                            // everything, so deselecting every port really does mean no MIDI in.
+                            sah->settings.midiBindAllPorts = false;
+                            sah->settings.midiPortNames = chosen;
 
-            saveSettings();
-          }
-        }
+                            saveSettings();
+                          }
+                        }
 
-        return 0;
-      });
+                        return 0;
+                      });
 
   message.on(WM_TIMER,
              [this](Message msg)

@@ -43,7 +43,7 @@ struct StandaloneSettings
   std::string outputDeviceName;  // empty means the system default device
   bool audioInputUsed{true};
   bool audioOutputUsed{true};
-  int32_t sampleRate{0};                      // 0 means the device's preferred rate
+  int32_t sampleRate{0};  // 0 means the device's preferred rate
   uint32_t bufferSize{defaultBufferSize};
 
   // An empty selection means "open every port", which is what the standalone did

@@ -156,8 +156,8 @@ void StandaloneHost::startAudioThread()
     }
 
     startAudioThreadOn(audioInputDeviceID, deviceInputChannels, audioInputUsed && numAudioInputs > 0,
-                       audioOutputDeviceID, deviceOutputChannels,
-                       audioOutputUsed && numAudioOutputs > 0, currentSampleRate);
+                       audioOutputDeviceID, deviceOutputChannels, audioOutputUsed && numAudioOutputs > 0,
+                       currentSampleRate);
   }
   catch (const std::exception &e)
   {
@@ -263,8 +263,7 @@ std::vector<uint32_t> StandaloneHost::getBufferSizes()
   // a menu of plausible sizes, not a claim about the device. 16 used to head the
   // list and was taken as the Windows first-run default, which is far too small
   // to run reliably on any backend.
-  std::vector<uint32_t> res{32,  48,  64,  96,  128,  144,  160,
-                            192, 224, 256, 480, 512, 1024, 2048, 4096};
+  std::vector<uint32_t> res{32, 48, 64, 96, 128, 144, 160, 192, 224, 256, 480, 512, 1024, 2048, 4096};
   return res;
 }
 

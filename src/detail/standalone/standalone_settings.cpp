@@ -169,9 +169,10 @@ bool StandaloneSettings::load(const fs::path &fromFile)
 
     if (loaded.version > currentVersion)
     {
-      LOGINFO("[WARNING] Standalone settings are version {} but this build understands {}; "
-              "reading what we recognise",
-              loaded.version, currentVersion);
+      LOGINFO(
+          "[WARNING] Standalone settings are version {} but this build understands {}; "
+          "reading what we recognise",
+          loaded.version, currentVersion);
     }
 
     if (!sawMidiSelection)

@@ -50,8 +50,7 @@ void StandaloneHost::openMidiPorts(const std::vector<std::string> &names, bool b
 
   for (unsigned int port = 0; port < available.size(); ++port)
   {
-    if (!bindAll &&
-        std::find(names.begin(), names.end(), available[port]) == names.end())
+    if (!bindAll && std::find(names.begin(), names.end(), available[port]) == names.end())
     {
       continue;
     }
