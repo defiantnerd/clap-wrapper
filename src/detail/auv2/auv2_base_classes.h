@@ -581,6 +581,20 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // ---------------- Clap::IHost
   void mark_dirty() override
   {
+    // AU has no setDirty(); the idiom is to tell the host that its cached
+    // kAudioUnitProperty_ClassInfo is stale (what param_rescan() already does).
+    // Deferred to onIdle(): PropertyChanged() runs the host's listeners
+    // synchronously and they are free to come back in through the property
+    // getters — a host reading ClassInfo from inside the notification would
+    // re-enter the plugin's state->save() while the plugin is still inside the
+    // call that reported dirty. The flag also collapses bursts into one
+    // notification per idle tick.
+    //
+    // Deliberately not accompanied by kAudioUnitProperty_PresentPreset: the
+    // wrapper exposes no presets, so AUBase's mCurrentPreset stays {-1,
+    // "Untitled"} and notifying it would only make hosts re-read an unchanged
+    // value. That belongs with CLAP preset-load support, when it arrives.
+    _requestMarkDirty = true;
   }
   void restartPlugin() override
   {
@@ -823,6 +837,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
 #endif
 
   std::atomic_bool _requestUICallback = false;
+  // set by mark_dirty(), serviced in onIdle()
+  std::atomic_bool _requestMarkDirty = false;
   std::atomic_bool _requestRestart = false;
 
   // Held by Render() for its whole body, and taken by onIdle() to fence against
