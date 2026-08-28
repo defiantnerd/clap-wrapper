@@ -754,6 +754,19 @@ class WrapAsAUV2 : public ausdk::AUBase,
   void addInputBus(int bus, const clap_audio_port_info_t *info);
   void addOutputBus(int bus, const clap_audio_port_info_t *info);
 
+  // Configuration requests for the main busses: main ports get the given
+  // channel counts, non-main ports keep their current ones. Shared by the
+  // PostConstructor probe and applyConfigurationFromBusFormats.
+  std::vector<clap_audio_port_configuration_request_t> mainBusConfigurationRequests(
+      uint32_t mainInChannels, uint32_t mainOutChannels) const;
+
+  // If the host chose main-bus stream formats that differ from the current
+  // CLAP port layout (ValidFormat admits every probed layout), push the
+  // matching configuration into the plugin via configurable-audio-ports and
+  // refresh the port caches. Called from activateCLAP: main thread, plugin
+  // deactivated — the state the extension requires.
+  void applyConfigurationFromBusFormats();
+
   void activateCLAP();
   void deactivateCLAP();
   // the AU-level half of the teardown, which an internal restart must not do
@@ -789,6 +802,22 @@ class WrapAsAUV2 : public ausdk::AUBase,
   };
   std::vector<AudioPortCache> _inputPortCache;
   std::vector<AudioPortCache> _outputPortCache;
+
+  // Main-bus channel-count pairs the plugin accepts, probed at
+  // PostConstructor through clap.configurable-audio-ports (the wrapper's
+  // only source of alternate layouts, mirroring the VST3 wrapper) under the
+  // same deactivated-only constraint as the port caches. Advertised through
+  // SupportedNumChannels, accepted in ValidFormat, applied in activateCLAP
+  // once the host has settled on formats (applyConfigurationFromBusFormats).
+  struct ChannelCapsCache
+  {
+    uint32_t inputChannels;   // main input channel count, 0 = no main input
+    uint32_t outputChannels;  // main output channel count, 0 = no main output
+  };
+  std::vector<ChannelCapsCache> _channelCapsCache;
+
+  // Upper bound of the per-scope channel counts probed for the cache.
+  static constexpr uint32_t kMaxProbedChannels = 8;
 
   uint32_t _midi_preferred_dialect = 0;
   uint32_t _midi_supported_dialects = 0;
