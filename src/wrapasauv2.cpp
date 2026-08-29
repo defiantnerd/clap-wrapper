@@ -204,7 +204,13 @@ OSStatus WrapAsAUV2::Initialize()
   // CLAP does not want it, therefore the wrapper insists on being in the
   // main thread
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
-  activateCLAP();
+  if (!activateCLAP())
+  {
+    // The host settled on a main-bus format pair the plugin does not accept
+    // (see activateCLAP). Refuse the initialization rather than render with
+    // buffers sized differently from the plugin's ports.
+    return kAudioUnitErr_FormatNotSupported;
+  }
 
 #if 0
   // get our current numChannels for input and output
@@ -1136,27 +1142,33 @@ std::vector<clap_audio_port_configuration_request_t> WrapAsAUV2::mainBusConfigur
   return requests;
 }
 
-void WrapAsAUV2::applyConfigurationFromBusFormats()
+bool WrapAsAUV2::applyConfigurationFromBusFormats()
 {
   // Nothing to reconcile unless the PostConstructor probe found alternate
   // layouts: without them ValidFormat pinned every bus to its port's count.
   if (_channelCapsCache.empty() || !_plugin->_ext._audioports ||
       !_plugin->_ext._configurable_audio_ports)
-    return;
+    return true;
 
   // The channel counts the host settled on for the main busses. AU elements
-  // map 1:1 to the CLAP ports scanned at PostConstructor.
+  // map 1:1 to the CLAP ports scanned at PostConstructor, but a plugin that
+  // changes its port *count* in apply_configuration can leave the caches
+  // longer than the element scopes, and ausdk's Input()/Output() throw on an
+  // element that does not exist - so never look past the element counts.
   bool mismatch = false;
   uint32_t mainInChannels = 0, mainOutChannels = 0;
 
-  for (size_t i = 0; i < _inputPortCache.size(); ++i)
+  const size_t numInputElements = Inputs().GetNumberOfElements();
+  const size_t numOutputElements = Outputs().GetNumberOfElements();
+
+  for (size_t i = 0; i < _inputPortCache.size() && i < numInputElements; ++i)
   {
     if (!_inputPortCache[i].isMain) continue;
     mainInChannels = Input(static_cast<AudioUnitElement>(i)).GetStreamFormat().mChannelsPerFrame;
     mismatch |= (mainInChannels != _inputPortCache[i].channelCount);
     break;
   }
-  for (size_t i = 0; i < _outputPortCache.size(); ++i)
+  for (size_t i = 0; i < _outputPortCache.size() && i < numOutputElements; ++i)
   {
     if (!_outputPortCache[i].isMain) continue;
     mainOutChannels = Output(static_cast<AudioUnitElement>(i)).GetStreamFormat().mChannelsPerFrame;
@@ -1164,7 +1176,7 @@ void WrapAsAUV2::applyConfigurationFromBusFormats()
     break;
   }
 
-  if (!mismatch) return;
+  if (!mismatch) return true;
 
   auto requests = mainBusConfigurationRequests(mainInChannels, mainOutChannels);
   const bool applied = _plugin->_ext._configurable_audio_ports->apply_configuration(
@@ -1174,13 +1186,14 @@ void WrapAsAUV2::applyConfigurationFromBusFormats()
   {
     LOGINFO("[clap-wrapper] could not apply an audio port configuration for {}/{} channels",
             mainInChannels, mainOutChannels);
-    return;
+    return false;
   }
 
   // The port layout changed: refresh the snapshots and the bus names/formats
-  // from the rescanned ports (element counts are unchanged — the configs
-  // describe main-port layouts). The plugin is still deactivated here, so the
-  // scan is legal.
+  // from the rescanned ports. The plugin is still deactivated here, so the
+  // scan is legal. Ports past the AU element counts (frozen at
+  // PostConstructor) are cached but get no bus; the process adapter clamps
+  // to the element counts the same way.
   auto ap = _plugin->_ext._audioports;
   auto pl = _plugin->_plugin;
 
@@ -1191,7 +1204,7 @@ void WrapAsAUV2::applyConfigurationFromBusFormats()
     clap_audio_port_info inf;
     ap->get(pl, i, true, &inf);
     _inputPortCache.push_back({inf.channel_count, (inf.flags & CLAP_AUDIO_PORT_IS_MAIN) != 0});
-    addInputBus(static_cast<int>(i), &inf);
+    if (i < numInputElements) addInputBus(static_cast<int>(i), &inf);
   }
 
   _outputPortCache.clear();
@@ -1201,14 +1214,15 @@ void WrapAsAUV2::applyConfigurationFromBusFormats()
     clap_audio_port_info inf;
     ap->get(pl, i, false, &inf);
     _outputPortCache.push_back({inf.channel_count, (inf.flags & CLAP_AUDIO_PORT_IS_MAIN) != 0});
-    addOutputBus(static_cast<int>(i), &inf);
+    if (i < numOutputElements) addOutputBus(static_cast<int>(i), &inf);
   }
 
   LOGINFO("[clap-wrapper] applied audio port configuration for {}/{} channels", mainInChannels,
           mainOutChannels);
+  return true;
 }
 
-void WrapAsAUV2::activateCLAP()
+bool WrapAsAUV2::activateCLAP()
 {
   if (_plugin)
   {
@@ -1216,8 +1230,17 @@ void WrapAsAUV2::activateCLAP()
     if (!_processAdapter) _processAdapter = std::make_unique<Clap::AUv2::ProcessAdapter>();
 
     // Reconcile the host-chosen bus formats with the plugin's port layout
-    // before anything reads the ports: main thread, plugin deactivated.
-    applyConfigurationFromBusFormats();
+    // before anything reads the ports: main thread, plugin deactivated. A
+    // failure here must fail the activation: ValidFormat can only vet each
+    // scope on its own (AU hosts set formats one SetProperty at a time), so
+    // the host can legally land on an input/output *pair* the plugin
+    // rejects - and activating anyway would size the AU render buffers
+    // differently from the plugin's ports, which is a heap overrun in the
+    // render path.
+    if (!applyConfigurationFromBusFormats())
+    {
+      return false;
+    }
 
     auto maxSampleFrames = Base::GetMaxFramesPerSlice();
     auto minSampleFrames = (maxSampleFrames >= 16) ? 16 : 1;
@@ -1241,6 +1264,7 @@ void WrapAsAUV2::activateCLAP()
     _plugin->start_processing();
     _initialized = true;
   }
+  return true;
 }
 
 void WrapAsAUV2::deactivateCLAP()
@@ -1517,7 +1541,14 @@ void WrapAsAUV2::onIdle()
     if (wasInitialized)
     {
       deactivateCLAP();
-      activateCLAP();
+      // Cannot fail for the format-pair reason Initialize guards against:
+      // the formats have not changed since the last successful activation.
+      // If it fails anyway, _initialized stays false and renders return
+      // silence, the same state as before Initialize.
+      if (!activateCLAP())
+      {
+        LOGINFO("[clap-wrapper] restart: could not reactivate the plugin");
+      }
     }
   }
 }
@@ -1854,42 +1885,71 @@ void WrapAsAUV2::PostConstructor()
   // live afterwards. Every accepted pair is advertised through
   // SupportedNumChannels, accepted by ValidFormat, and applied in
   // activateCLAP once the host has settled on formats.
-  if (_plugin->_ext._configurable_audio_ports && (!_inputPortCache.empty() || !_outputPortCache.empty()))
+  // Gated on having output ports like the port-derived cross-product in
+  // SupportedNumChannels: an input-only plugin renders through the
+  // placeholder output element, and a probed pair would contradict that by
+  // advertising 0 output channels.
+  if (_plugin->_ext._configurable_audio_ports && !_outputPortCache.empty())
   {
+    bool hasMainIn = false, hasMainOut = false;
     uint32_t currentIn = 0, currentOut = 0;
     for (const auto &port : _inputPortCache)
       if (port.isMain)
       {
+        hasMainIn = true;
         currentIn = port.channelCount;
         break;
       }
     for (const auto &port : _outputPortCache)
       if (port.isMain)
       {
+        hasMainOut = true;
         currentOut = port.channelCount;
         break;
       }
 
-    // A scope without a main port contributes the fixed count 0.
-    const uint32_t minIn = currentIn ? 1 : 0, maxIn = currentIn ? kMaxProbedChannels : 0;
-    const uint32_t minOut = currentOut ? 1 : 0, maxOut = currentOut ? kMaxProbedChannels : 0;
-
-    for (uint32_t in = minIn; in <= maxIn; ++in)
+    // The probe varies only the main ports, and an AUChannelInfo pair can
+    // only describe the main busses. A scope that has ports but none marked
+    // main - a sidechain-only input, or a plugin that never sets
+    // CLAP_AUDIO_PORT_IS_MAIN at all - can be neither varied nor described:
+    // a probed pair would advertise 0 channels for a scope that does take
+    // audio. Leave the cache empty in that case, which keeps the pre-probe
+    // behaviour: SupportedNumChannels falls back to the port-derived
+    // cross-product and ValidFormat pins every bus to its port's count.
+    if ((_inputPortCache.empty() || hasMainIn) && (_outputPortCache.empty() || hasMainOut))
     {
-      for (uint32_t out = minOut; out <= maxOut; ++out)
+      // The active layout is advertised unconditionally, whatever its
+      // width: the grid below only *adds* alternates, so kMaxProbedChannels
+      // never hides the plugin's own configuration (a 16-channel main
+      // output stays advertised even though the grid stops at 8).
+      _channelCapsCache.push_back({currentIn, currentOut});
+
+      // A scope without any ports contributes the fixed count 0.
+      const uint32_t minIn = currentIn ? 1 : 0, maxIn = currentIn ? kMaxProbedChannels : 0;
+      const uint32_t minOut = currentOut ? 1 : 0, maxOut = currentOut ? kMaxProbedChannels : 0;
+
+      for (uint32_t in = minIn; in <= maxIn; ++in)
       {
-        bool accepted = (in == currentIn && out == currentOut);  // current layout is a given
-        if (!accepted)
+        for (uint32_t out = minOut; out <= maxOut; ++out)
         {
+          if (in == currentIn && out == currentOut) continue;  // seeded above
           auto requests = mainBusConfigurationRequests(in, out);
-          accepted = _plugin->_ext._configurable_audio_ports->can_apply_configuration(
-              _plugin->_plugin, requests.data(), static_cast<uint32_t>(requests.size()));
+          if (_plugin->_ext._configurable_audio_ports->can_apply_configuration(
+                  _plugin->_plugin, requests.data(), static_cast<uint32_t>(requests.size())))
+          {
+            _channelCapsCache.push_back({in, out});
+          }
         }
-        if (accepted) _channelCapsCache.push_back({in, out});
       }
+      LOGINFO("[clap-wrapper] PostConstructor: {} probed main-bus channel layouts",
+              _channelCapsCache.size());
     }
-    LOGINFO("[clap-wrapper] PostConstructor: {} probed main-bus channel layouts",
-            _channelCapsCache.size());
+    else
+    {
+      LOGINFO(
+          "[clap-wrapper] PostConstructor: not probing channel layouts, a scope has ports but no "
+          "main port");
+    }
   }
 
   // A plugin can legitimately declare no audio output ports (a note effect such

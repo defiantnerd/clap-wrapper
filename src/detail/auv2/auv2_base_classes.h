@@ -764,10 +764,15 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // CLAP port layout (ValidFormat admits every probed layout), push the
   // matching configuration into the plugin via configurable-audio-ports and
   // refresh the port caches. Called from activateCLAP: main thread, plugin
-  // deactivated — the state the extension requires.
-  void applyConfigurationFromBusFormats();
+  // deactivated — the state the extension requires. Returns false when the
+  // plugin rejects the configuration, in which case activation must not
+  // proceed (the AU formats and the plugin's ports would disagree about
+  // buffer sizes).
+  bool applyConfigurationFromBusFormats();
 
-  void activateCLAP();
+  // Returns false when the plugin rejects the host-chosen bus formats; the
+  // caller must treat that as a failed initialization.
+  bool activateCLAP();
   void deactivateCLAP();
   // the AU-level half of the teardown, which an internal restart must not do
   void releaseHostMIDIOutput();
@@ -816,7 +821,12 @@ class WrapAsAUV2 : public ausdk::AUBase,
   };
   std::vector<ChannelCapsCache> _channelCapsCache;
 
-  // Upper bound of the per-scope channel counts probed for the cache.
+  // Upper bound of the per-scope main-bus *channel counts* probed for the
+  // cache (not a bus count). The active layout is seeded into the cache
+  // unconditionally, so a plugin whose main bus is wider than this still
+  // advertises its own configuration; the bound only limits how many
+  // alternate layouts are asked about (and so how many
+  // can_apply_configuration calls a single instantiation makes).
   static constexpr uint32_t kMaxProbedChannels = 8;
 
   uint32_t _midi_preferred_dialect = 0;
