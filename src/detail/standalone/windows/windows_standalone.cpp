@@ -1102,6 +1102,20 @@ Plugin::Plugin(std::shared_ptr<Clap::Plugin> clapPlugin, int nCmdShow)
                    // the plugin refuses to reactivate.
                    sah->activatePlugin(sah->currentSampleRate, 1, sah->currentBufferSize * 2);
                  }
+
+                 if (sah->processRequested.exchange(false))
+                 {
+                   // Unlike a plugin wrapper, the standalone owns its audio
+                   // engine, so a wake request means something here: if the
+                   // plugin is not active, stand it up. If it already is, the
+                   // callback is pulling it and there is nothing to do. The
+                   // sample rate check keeps this from firing before the
+                   // engine has ever run.
+                   if (!sah->isActive && sah->currentSampleRate > 0)
+                   {
+                     sah->activatePlugin(sah->currentSampleRate, 1, sah->currentBufferSize * 2);
+                   }
+                 }
                }
 
                return 0;

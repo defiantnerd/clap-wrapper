@@ -1551,6 +1551,69 @@ void WrapAsAUV2::onIdle()
       }
     }
   }
+
+  // After the restart branch on purpose: a restart asked for in the same tick
+  // ends with the plugin activated and processing, which is what a wake would
+  // have been asking for anyway.
+  if (_requestProcess.exchange(false) && _plugin)
+  {
+    auto guarantee_mainthread = _plugin->AlwaysMainThread();
+
+    // AU offers a plugin nothing like this: there is no way to make the host
+    // start pulling Render(). What the wrapper does own is the CLAP's own
+    // activate/start_processing pair, which it drives from AU Initialize() --
+    // so if the AU is initialized and the CLAP is not running underneath it,
+    // stand it back up. No lock is needed to decide that: activateCLAP()
+    // publishes _initialized last, and a render that reads it false returns
+    // without touching the plugin, exactly as it does before the AU is
+    // initialized at all.
+    if (IsInitialized() && !_initialized)
+    {
+      activateCLAP();
+    }
+    else if (!_initialized)
+    {
+      // Nothing to wake, and nothing is going to render. clap/ext/params.h
+      // names request_flush() and request_process() as the two ways to get a
+      // GUI-side parameter change into the processor, so deliver the one of
+      // the two the AU can actually deliver -- otherwise a plugin that picked
+      // request_process() (as it may) gets no path in at all.
+      ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+      if (!_initialized) flushParameters();
+    }
+    // else: active and processing, the host is already pulling us.
+  }
+
+  if (_requestedFlush.exchange(false) && _plugin)
+  {
+    auto guarantee_mainthread = _plugin->AlwaysMainThread();
+
+    // The lock is what makes this safe to do from the idle thread: a render
+    // that started before _initialized went false may still be inside the
+    // process adapter pushing output events into _queueToUI, and that queue
+    // has one producer.
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+    if (!_initialized) flushParameters();
+  }
+}
+
+// Only legal while the CLAP is deactivated: clap_plugin_params.flush() is
+// [main-thread] when the plugin is inactive and [audio-thread] when it is
+// active, and while it is active process() carries the events anyway. Callers
+// check _initialized under _processLock.
+void WrapAsAUV2::flushParameters()
+{
+  if (!_plugin || !_plugin->_ext._params) return;
+
+  // A throwaway adapter, like the VST3 wrapper builds for its own flush: the
+  // real one only exists between activateCLAP() and deactivateCLAP(), and this
+  // path runs precisely when it does not. No audio is involved -- a zero
+  // numMaxSamples skips the silent-stream buffers, and the plugin is handed no
+  // audio ports.
+  Clap::AUv2::ProcessAdapter pa;
+  pa.setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this, &_parametertree,
+                     this, 0, _midi_preferred_dialect, _midi_supported_dialects, 0, 0);
+  pa.flush();
 }
 
 OSStatus WrapAsAUV2::SaveState(CFPropertyListRef *ptPList)

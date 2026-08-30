@@ -187,6 +187,25 @@ void ProcessAdapter::sortEventIndices()
             });
 }
 
+// Parameter-only round trip, for when there is no render to carry the events.
+// clap_plugin_params.flush() is [main-thread] while the plugin is deactivated and
+// [audio-thread] while it is active; the wrapper only ever calls this on a
+// throwaway adapter for a deactivated plugin, which is why the event vectors are
+// cleared rather than preserved for a following process() cycle.
+void ProcessAdapter::flush()
+{
+  if (!_ext_params) return;
+
+  _events.clear();
+  _eventindices.clear();
+
+  // no sortEventIndices(): there is no input event to order
+  _ext_params->flush(_plugin, _processData.in_events, _processData.out_events);
+
+  _events.clear();
+  _eventindices.clear();
+}
+
 void ProcessAdapter::process(ProcessData &data)
 {
   // CLAP requires event times within [0, frames_count); a host stamping

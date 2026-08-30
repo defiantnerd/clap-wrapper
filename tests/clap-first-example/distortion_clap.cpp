@@ -343,6 +343,11 @@ bool clap1stDist_state_load(const clap_plugin_t *plugin, const clap_istream_t *s
     p->rescan(clapHost, CLAP_PARAM_RESCAN_TEXT);
     p->request_flush(clapHost);
   }
+  // clap/ext/params.h names request_flush() and clap_host.request_process() as
+  // the two ways to get the values just loaded into the processor. Ask for both,
+  // so a wrapper that only implements one of them still gets them - and so the
+  // request_process() path is exercised by the wrappers' own test runs.
+  clapHost->request_process(clapHost);
   return true;
 }
 static const clap_plugin_state_t s_clap1stDist_state = {clap1stDist_state_save, clap1stDist_state_load};

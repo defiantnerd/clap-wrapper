@@ -50,6 +50,17 @@
     standaloneHost->running = standaloneHost->activatePlugin(standaloneHost->currentSampleRate, 1,
                                                              standaloneHost->currentBufferSize * 2);
   }
+
+  // Unlike a plugin wrapper, the standalone owns its audio engine, so a wake
+  // request means something here: if the plugin is not active, stand it up. If
+  // it already is, the callback is pulling it and there is nothing to do. The
+  // sample rate check keeps this from firing before the engine has ever run.
+  if (standaloneHost->processRequested.exchange(false) && !standaloneHost->isActive &&
+      standaloneHost->currentSampleRate > 0)
+  {
+    standaloneHost->running = standaloneHost->activatePlugin(standaloneHost->currentSampleRate, 1,
+                                                             standaloneHost->currentBufferSize * 2);
+  }
 }
 
 - (void)doSetup

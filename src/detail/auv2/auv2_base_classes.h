@@ -600,6 +600,14 @@ class WrapAsAUV2 : public ausdk::AUBase,
   {
     _requestRestart = true;
   }
+  void request_process() override
+  {
+    // AU gives a plugin no way to make the host pull Render(), so this cannot
+    // mean what it means in a real host. What the wrapper does own is the CLAP's
+    // own activate/start_processing pair, and the parameter flush -- see
+    // onIdle(), which decides which of the two this tick can deliver.
+    _requestProcess = true;
+  }
   void request_callback() override
   {
     _requestUICallback = true;
@@ -623,6 +631,10 @@ class WrapAsAUV2 : public ausdk::AUBase,
   }
   void param_request_flush() override
   {
+    // Deferred to onIdle(): flush() is only ours to call while the CLAP is
+    // deactivated -- once it is active the render thread owns that call, and
+    // then a flush is not needed anyway because process() carries the events.
+    _requestedFlush = true;
   }
 
   void latency_changed() override;
@@ -774,6 +786,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // caller must treat that as a failed initialization.
   bool activateCLAP();
   void deactivateCLAP();
+  // parameter-only round trip on a throwaway process adapter, for when no render
+  // is running to carry the events. Only legal while the CLAP is deactivated.
+  void flushParameters();
   // the AU-level half of the teardown, which an internal restart must not do
   void releaseHostMIDIOutput();
   bool IsBypassEffect()
@@ -879,6 +894,10 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // set by mark_dirty(), serviced in onIdle()
   std::atomic_bool _requestMarkDirty = false;
   std::atomic_bool _requestRestart = false;
+  // set by request_process(), serviced in onIdle()
+  std::atomic_bool _requestProcess = false;
+  // set by param_request_flush(), serviced in onIdle()
+  std::atomic_bool _requestedFlush = false;
 
   // Held by Render() for its whole body, and taken by onIdle() to fence against
   // an in-flight render before it rebuilds the plugin. See onIdle().

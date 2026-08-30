@@ -207,6 +207,14 @@ class AUv3ImplDetail : public Clap::IHost, public Clap::IAutomation, public os::
     AUV3LOG("IHost::restartPlugin() called");
   }
 
+  void request_process() override
+  {
+    // The AUv3 host owns the render resources: start_processing() happens in
+    // allocateRenderResourcesAndReturnError:, which only the host calls. There
+    // is nothing to wake from this side.
+    AUV3LOG("IHost::request_process() called");
+  }
+
   void request_callback() override
   {
     // Just set the flag. The main-queue idle timer will service it between

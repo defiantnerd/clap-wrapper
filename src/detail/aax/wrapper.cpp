@@ -1108,6 +1108,12 @@ void ClapAsAAX::restartPlugin()
 {
 }
 
+void ClapAsAAX::request_process()
+{
+  // AAX has no host-facing way to ask for processing to start, the same as
+  // restartPlugin() above.
+}
+
 bool ClapAsAAX::register_timer(uint32_t period_ms, clap_id *timer_id)
 {
   // AAX TimerWakeup fires at roughly 30ms; clamp period to that minimum.
