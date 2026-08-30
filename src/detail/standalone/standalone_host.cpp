@@ -1,4 +1,5 @@
 
+#include <algorithm>
 #include <cassert>
 #include "standalone_host.h"
 #include <fstream>
@@ -53,27 +54,62 @@ void StandaloneHost::setupAudioBusses(const clap_plugin_t *plugin,
                                       const clap_plugin_audio_ports_t *audioports)
 {
   if (!audioports) return;
+
+  inputChannelByBus.clear();
+  outputChannelByBus.clear();
+  totalInputChannels = 0;
+  totalOutputChannels = 0;
+  mainInput = 0;
+  mainOutput = 0;
+
   numAudioInputs = audioports->count(plugin, true);
   numAudioOutputs = audioports->count(plugin, false);
   LOGDETAIL("inputs/outputs : {}/{}", numAudioInputs, numAudioOutputs);
 
+  // clapProcess works out of fixed pools: one clap_audio_buffer per bus and
+  // one utilityBuffer lane per channel, utilityBufferMaxChannels of each. A
+  // release build has no assert to catch a plugin that reports more, so clamp
+  // here - surplus busses are dropped and surplus channels truncated to zero -
+  // to keep the process loop inside the pools.
+  const auto maxChannels = static_cast<uint32_t>(utilityBufferMaxChannels);
+  if (numAudioInputs + numAudioOutputs > maxChannels)
+  {
+    LOGINFO("[ERROR] plugin reports {} audio busses, more than the supported {}; dropping the surplus",
+            numAudioInputs + numAudioOutputs, maxChannels);
+    numAudioInputs = std::min(numAudioInputs, maxChannels);
+    numAudioOutputs = maxChannels - numAudioInputs;
+  }
+
+  uint32_t channelBudget{maxChannels};
   clap_audio_port_info_t info;
   for (auto i = 0U; i < numAudioInputs; ++i)
   {
     audioports->get(plugin, i, true, &info);
-    inputChannelByBus.push_back(info.channel_count);
-    totalInputChannels += info.channel_count;
+    auto busChans = std::min(info.channel_count, channelBudget);
+    if (busChans != info.channel_count)
+    {
+      LOGINFO("[ERROR] input bus {} truncated from {} to {} channels; the utility buffer holds {}", i,
+              info.channel_count, busChans, maxChannels);
+    }
+    channelBudget -= busChans;
+    inputChannelByBus.push_back(busChans);
+    totalInputChannels += busChans;
     if (info.flags & CLAP_AUDIO_PORT_IS_MAIN) mainInput = i;
   }
   for (auto i = 0U; i < numAudioOutputs; ++i)
   {
     audioports->get(plugin, i, false, &info);
-    outputChannelByBus.push_back(info.channel_count);
-    totalOutputChannels += info.channel_count;
+    auto busChans = std::min(info.channel_count, channelBudget);
+    if (busChans != info.channel_count)
+    {
+      LOGINFO("[ERROR] output bus {} truncated from {} to {} channels; the utility buffer holds {}", i,
+              info.channel_count, busChans, maxChannels);
+    }
+    channelBudget -= busChans;
+    outputChannelByBus.push_back(busChans);
+    totalOutputChannels += busChans;
     if (info.flags & CLAP_AUDIO_PORT_IS_MAIN) mainOutput = i;
   }
-
-  assert(totalOutputChannels + totalInputChannels < utilityBufferMaxChannels);
 }
 
 void StandaloneHost::setupMIDIBusses(const clap_plugin_t *plugin,
@@ -108,7 +144,11 @@ void StandaloneHost::clapProcess(void *pOutput, const void *pInput, uint32_t fra
 
   if (!running)
   {
-    memset(f, 0, frameCount * currentOutputChannels * sizeof(float));
+    // f is null when the stream has no output side (input-only device setup).
+    if (f && currentOutputChannels > 0)
+    {
+      memset(f, 0, frameCount * currentOutputChannels * sizeof(float));
+    }
     finishedRunning = true;
     return;
   }
@@ -128,34 +168,32 @@ void StandaloneHost::clapProcess(void *pOutput, const void *pInput, uint32_t fra
     std::terminate();
   }
 
-  process.audio_outputs_count = 1;
-
   float *bufferChanPtr[utilityBufferMaxChannels]{};
   clap_audio_buffer buffers[utilityBufferMaxChannels]{};  // probably twice as large
   size_t ptrIdx{0};
   size_t bufIdx{0};
 
   int32_t mainOutIdx{-1}, mainInIdx{-1};
+  uint32_t mainInChans{0}, mainOutChans{0};
 
   process.audio_inputs = &(buffers[0]);
   for (auto inp = 0U; inp < numAudioInputs; ++inp)
   {
-    // For now assert sterep
-    assert(inputChannelByBus[inp] == 2);
-    bufferChanPtr[ptrIdx] = &(utilityBuffer[ptrIdx][0]);
-    memset(bufferChanPtr[ptrIdx], 0, frameCount * sizeof(float));
-    ptrIdx++;
-    bufferChanPtr[ptrIdx] = &(utilityBuffer[ptrIdx][0]);
-    memset(bufferChanPtr[ptrIdx], 0, frameCount * sizeof(float));
-    ptrIdx++;
+    auto busChans = inputChannelByBus[inp];
+    buffers[bufIdx].channel_count = busChans;
+    buffers[bufIdx].data32 = &(bufferChanPtr[ptrIdx]);
 
-    buffers[bufIdx].channel_count = 2;
-    buffers[bufIdx].data32 = &(bufferChanPtr[ptrIdx - 2]);
-
-    if (mainInIdx < 0)
+    if (mainInIdx < 0 && inp == mainInput && busChans > 0)
     {
-      // TODO cleaner
-      mainInIdx = (int32_t)(ptrIdx - 2);
+      mainInIdx = (int32_t)ptrIdx;
+      mainInChans = busChans;
+    }
+
+    for (auto ch = 0U; ch < busChans; ++ch)
+    {
+      bufferChanPtr[ptrIdx] = &(utilityBuffer[ptrIdx][0]);
+      memset(bufferChanPtr[ptrIdx], 0, frameCount * sizeof(float));
+      ptrIdx++;
     }
     bufIdx++;
   }
@@ -163,35 +201,40 @@ void StandaloneHost::clapProcess(void *pOutput, const void *pInput, uint32_t fra
   process.audio_outputs = &(buffers[bufIdx]);
   for (auto oup = 0U; oup < numAudioOutputs; ++oup)
   {
-    // For now assert sterep
-    assert(outputChannelByBus[oup] == 2);
-    bufferChanPtr[ptrIdx] = &(utilityBuffer[ptrIdx][0]);
-    ptrIdx++;
-    bufferChanPtr[ptrIdx] = &(utilityBuffer[ptrIdx][0]);
-    ptrIdx++;
+    auto busChans = outputChannelByBus[oup];
+    buffers[bufIdx].channel_count = busChans;
+    buffers[bufIdx].data32 = &(bufferChanPtr[ptrIdx]);
 
-    buffers[bufIdx].channel_count = 2;
-    buffers[bufIdx].data32 = &(bufferChanPtr[ptrIdx - 2]);
-
-    if (mainOutIdx < 0)
+    if (mainOutIdx < 0 && oup == mainOutput && busChans > 0)
     {
-      // TODO cleaner
-      mainOutIdx = (int32_t)(ptrIdx - 2);
+      mainOutIdx = (int32_t)ptrIdx;
+      mainOutChans = busChans;
     }
 
+    for (auto ch = 0U; ch < busChans; ++ch)
+    {
+      bufferChanPtr[ptrIdx] = &(utilityBuffer[ptrIdx][0]);
+      ptrIdx++;
+    }
     bufIdx++;
   }
 
-  if (mainInIdx >= 0 && pInput)
+  if (mainInIdx >= 0 && pInput && currentInputChannels > 0)
   {
+    // Route the interleaved device stream onto the plugin's main input bus.
+    // When the bus is wider than the device the last device channel repeats
+    // (a mono device feeds both channels of a stereo bus); when the device is
+    // wider the surplus device channels are dropped.
     auto *g = (const float *)pInput;
     auto stride = currentInputChannels;
-    auto chan2Off = (currentInputChannels > 1) ? 1 : 0;
 
-    for (auto i = 0U; i < frameCount; ++i)
+    for (auto ch = 0U; ch < mainInChans; ++ch)
     {
-      utilityBuffer[mainInIdx][i] = g[stride * i];
-      utilityBuffer[mainInIdx + 1][i] = g[stride * i + chan2Off];
+      auto devChan = (ch < currentInputChannels) ? ch : currentInputChannels - 1;
+      for (auto i = 0U; i < frameCount; ++i)
+      {
+        utilityBuffer[mainInIdx + ch][i] = g[stride * i + devChan];
+      }
     }
   }
 
@@ -212,10 +255,24 @@ void StandaloneHost::clapProcess(void *pOutput, const void *pInput, uint32_t fra
 
   clapPlugin->_plugin->process(clapPlugin->_plugin, &process);
 
-  for (auto i = 0U; i < frameCount; ++i)
+  if (mainOutIdx >= 0 && f && currentOutputChannels > 0)
   {
-    f[2 * i] = utilityBuffer[mainOutIdx][i];
-    f[2 * i + 1] = utilityBuffer[mainOutIdx + 1][i];
+    // Interleave the plugin's main output bus into the device stream with the
+    // same channel policy as the input: the last bus channel repeats when the
+    // device is wider (a mono bus plays on both device channels), surplus bus
+    // channels are dropped.
+    for (auto i = 0U; i < frameCount; ++i)
+    {
+      for (auto ch = 0U; ch < currentOutputChannels; ++ch)
+      {
+        auto busChan = (ch < mainOutChans) ? ch : mainOutChans - 1;
+        f[currentOutputChannels * i + ch] = utilityBuffer[mainOutIdx + busChan][i];
+      }
+    }
+  }
+  else if (f && currentOutputChannels > 0)
+  {
+    memset(f, 0, frameCount * currentOutputChannels * sizeof(float));
   }
 }
 

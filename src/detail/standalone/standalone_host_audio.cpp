@@ -330,6 +330,14 @@ void StandaloneHost::startAudioThreadOnImpl(unsigned int inputDeviceID, uint32_t
   // to reset running/finishedRunning here.
   stopAudioThread();
 
+  // The channel counts granted to the previous stream must not outlive it:
+  // rtaCallback sizes its interleaving from them, and a stale non-zero count
+  // paired with the null device buffer of a stream that dropped that side
+  // would crash the audio thread. They are set again below once the new
+  // stream is open.
+  currentInputChannels = 0;
+  currentOutputChannels = 0;
+
   audioInputDeviceID = inputDeviceID;
   audioInputUsed = useInput;
   audioOutputDeviceID = outputDeviceID;
