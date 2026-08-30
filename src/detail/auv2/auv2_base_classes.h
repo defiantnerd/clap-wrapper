@@ -604,8 +604,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   {
     // AU gives a plugin no way to make the host pull Render(), so this cannot
     // mean what it means in a real host. What the wrapper does own is the CLAP's
-    // own activate/start_processing pair, and the parameter flush -- see
-    // onIdle(), which decides which of the two this tick can deliver.
+    // own activate/start_processing pair -- see onIdle(), which stands the plugin
+    // back up if the AU is initialized and the CLAP underneath it is not, and
+    // then asks for the flush that carries whatever the request was really about.
     _requestProcess = true;
   }
   void request_callback() override
@@ -631,9 +632,10 @@ class WrapAsAUV2 : public ausdk::AUBase,
   }
   void param_request_flush() override
   {
-    // Deferred to onIdle(): flush() is only ours to call while the CLAP is
-    // deactivated -- once it is active the render thread owns that call, and
-    // then a flush is not needed anyway because process() carries the events.
+    // May arrive at any moment and in any state, active or not: it says the
+    // plugin has parameter events, not that it has stopped processing. Deferred
+    // to onIdle(), which is the only place that can tell whether a render is
+    // going to carry them already.
     _requestedFlush = true;
   }
 
@@ -730,6 +732,11 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   // --------------- IPlugObject
   void onIdle() override;
+
+  // drains _queueToUI into the host's parameter listeners; called at the top of
+  // onIdle() and again after an idle flush, so a value the flush pulled out of
+  // the plugin does not wait a further tick to be announced.
+  void pushQueuedEventsToHost();
 
   // context menu extension
   bool supportsContextMenu() const override
@@ -896,8 +903,15 @@ class WrapAsAUV2 : public ausdk::AUBase,
   std::atomic_bool _requestRestart = false;
   // set by request_process(), serviced in onIdle()
   std::atomic_bool _requestProcess = false;
-  // set by param_request_flush(), serviced in onIdle()
+  // "there are parameter events to move": set by param_request_flush() for the
+  // plugin's direction and by SetParameter for the host's, serviced in onIdle()
   std::atomic_bool _requestedFlush = false;
+  // set by Render(), cleared by onIdle(): tells the idle tick whether a render
+  // has carried the plugin's events since it last looked. See onIdle().
+  std::atomic_bool _renderedSinceIdle = false;
+  // consecutive idle ticks that saw no render, saturating at the point where the
+  // idle tick takes over the flushing. Only onIdle() touches it.
+  uint32_t _idleTicksSinceRender = 0;
 
   // Held by Render() for its whole body, and taken by onIdle() to fence against
   // an in-flight render before it rebuilds the plugin. See onIdle().
