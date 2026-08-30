@@ -40,6 +40,7 @@ class IHost
 
   virtual void mark_dirty() = 0;
   virtual void restartPlugin() = 0;
+  virtual void request_process() = 0;
   virtual void request_callback() = 0;
 
   virtual void setupWrapperSpecifics(

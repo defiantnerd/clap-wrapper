@@ -425,6 +425,11 @@ class WrapAsAUV2 : public ausdk::AUBase,
     const UInt32 strippedStatus = inStatus & 0xf0U;  // NOLINT
     const UInt32 channel = inStatus & 0x0fU;         // NOLINT
 
+    // Every path that queues onto the adapter takes the process lock. A host
+    // may call the MusicDevice entry points from its MIDI thread at any time,
+    // including while the idle tick is flushing (see onIdle()) -- and the
+    // adapter's event queue takes one writer at a time.
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (_processAdapter)
     {
       _processAdapter->addMIDIEvent(inStatus, inData1, inData2, inOffsetSampleFrame);
@@ -443,6 +448,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // note-expression handling of the MIDI1 path.
   OSStatus MIDIEventList(UInt32 inOffsetSampleFrame, const struct MIDIEventList *evtlist) override
   {
+    // Held across the whole list rather than per event; handleUMPSysEx7() is
+    // called from inside it and must not take it again. See MIDIEvent().
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (!_processAdapter || !evtlist) return noErr;
 
     const bool midi2 = (evtlist->protocol == kMIDIProtocol_2_0);
@@ -502,6 +510,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   // Reassemble a UMP SysEx7 packet stream into a single CLAP SysEx event using the
   // shared reassembler; on a complete message it is already framed with 0xF0/0xF7.
+  // Called only from MIDIEventList(), which holds the process lock for the
+  // whole list -- do not take it here, it is not recursive.
   void handleUMPSysEx7(uint32_t w0, uint32_t w1, UInt32 offset)
   {
     if (!_processAdapter) return;
@@ -515,6 +525,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   OSStatus SysEx(const UInt8 *inData, UInt32 inLength) override
   {
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (_processAdapter)
     {
       // the AU SysEx entry point carries no sample offset; deliver at frame 0
@@ -528,6 +539,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
                      NoteInstanceID *outNoteInstanceID, UInt32 inOffsetSampleFrame,
                      const MusicDeviceNoteParams &inParams) override
   {
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (!_processAdapter) return kAudioUnitErr_Uninitialized;
 
     const int16_t channel = static_cast<int16_t>(inGroupID & 0x0F);
@@ -545,6 +557,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
   OSStatus StopNote(MusicDeviceGroupID inGroupID, NoteInstanceID inNoteInstanceID,
                     UInt32 inOffsetSampleFrame) override
   {
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (!_processAdapter) return kAudioUnitErr_Uninitialized;
     const int16_t channel = static_cast<int16_t>(inGroupID & 0x0F);
     _processAdapter->stopNote(static_cast<int32_t>(inNoteInstanceID), channel, inOffsetSampleFrame);
@@ -600,6 +613,15 @@ class WrapAsAUV2 : public ausdk::AUBase,
   {
     _requestRestart = true;
   }
+  void request_process() override
+  {
+    // AU gives a plugin no way to make the host pull Render(), so this cannot
+    // mean what it means in a real host. What the wrapper does own is the CLAP's
+    // own activate/start_processing pair -- see onIdle(), which stands the plugin
+    // back up if the AU is initialized and the CLAP underneath it is not, and
+    // then asks for the flush that carries whatever the request was really about.
+    _requestProcess = true;
+  }
   void request_callback() override
   {
     _requestUICallback = true;
@@ -623,6 +645,11 @@ class WrapAsAUV2 : public ausdk::AUBase,
   }
   void param_request_flush() override
   {
+    // May arrive at any moment and in any state, active or not: it says the
+    // plugin has parameter events, not that it has stopped processing. Deferred
+    // to onIdle(), which is the only place that can tell whether a render is
+    // going to carry them already.
+    _requestedFlush = true;
   }
 
   void latency_changed() override;
@@ -719,6 +746,11 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // --------------- IPlugObject
   void onIdle() override;
 
+  // drains _queueToUI into the host's parameter listeners; called at the top of
+  // onIdle() and again after an idle flush, so a value the flush pulled out of
+  // the plugin does not wait a further tick to be announced.
+  void pushQueuedEventsToHost();
+
   // context menu extension
   bool supportsContextMenu() const override
   {
@@ -774,6 +806,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // caller must treat that as a failed initialization.
   bool activateCLAP();
   void deactivateCLAP();
+  // parameter-only round trip on a throwaway process adapter, for when no render
+  // is running to carry the events. Only legal while the CLAP is deactivated.
+  void flushParameters();
   // the AU-level half of the teardown, which an internal restart must not do
   void releaseHostMIDIOutput();
   bool IsBypassEffect()
@@ -794,6 +829,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   std::shared_ptr<Clap::Plugin> _plugin = nullptr;
 
   std::unique_ptr<Clap::AUv2::ProcessAdapter> _processAdapter;
+  // Only for the deactivated-plugin flush, where _processAdapter does not
+  // exist. Lives across flushes so gestures pair up; see flushParameters().
+  std::unique_ptr<Clap::AUv2::ProcessAdapter> _flushAdapter;
   std::atomic<bool> _initialized = false;
 
   // some info about the wrapped clap
@@ -879,6 +917,22 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // set by mark_dirty(), serviced in onIdle()
   std::atomic_bool _requestMarkDirty = false;
   std::atomic_bool _requestRestart = false;
+  // set by request_process(), serviced in onIdle()
+  std::atomic_bool _requestProcess = false;
+  // "there are parameter events to move": set by param_request_flush() for the
+  // plugin's direction and by SetParameter for the host's, serviced in onIdle()
+  std::atomic_bool _requestedFlush = false;
+  // set by Render(), cleared by onIdle(): tells the idle tick whether a render
+  // has carried the plugin's events since it last looked. See onIdle().
+  std::atomic_bool _renderedSinceIdle = false;
+  // consecutive idle ticks that saw no render, saturating at the point where the
+  // idle tick takes over the flushing. Only onIdle() touches it.
+  uint32_t _idleTicksSinceRender = 0;
+  // how many of those ticks make a stopped host, sized from the block period in
+  // activateCLAP(). See onIdle().
+  static constexpr double kIdleTickMs = 10.0;
+  static constexpr uint32_t kMinIdleTicksBeforeFlush = 5;
+  uint32_t _idleTicksBeforeFlush = kMinIdleTicksBeforeFlush;
 
   // Held by Render() for its whole body, and taken by onIdle() to fence against
   // an in-flight render before it rebuilds the plugin. See onIdle().

@@ -336,6 +336,8 @@ class ClapAsVst3 : public Steinberg::Vst::SingleComponentEffect,
 
   void restartPlugin() override;
 
+  void request_process() override;
+
   void request_callback() override;
 
   bool track_info_get(clap_track_info_t *info) override;

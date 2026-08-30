@@ -1351,6 +1351,15 @@ void ClapAsVst3::mark_dirty()
   if (componentHandler2) componentHandler2->setDirty(true);
 }
 
+void ClapAsVst3::request_process()
+{
+  // Nothing VST3 can do with this. IComponentHandler has no "start pulling me"
+  // and the host alone decides when process() runs, so there is no honest
+  // wake here -- and no flush fallback either: onIdle() only runs while the
+  // component is active (os::attach lives in setActive), and while it is
+  // active the parameter flush belongs to the audio thread.
+}
+
 void ClapAsVst3::request_callback()
 {
   _requestUICallback = true;

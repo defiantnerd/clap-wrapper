@@ -236,6 +236,8 @@ class ClapAsAAX : public AAX_CEffectParameters,
 
   void restartPlugin() override;
 
+  void request_process() override;
+
   void request_callback() override;
 
   // clap_timer support

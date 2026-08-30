@@ -116,6 +116,11 @@ struct StandaloneHost : Clap::IHost
   {
     restartRequested = true;
   }
+  std::atomic<bool> processRequested{false};
+  void request_process() override
+  {
+    processRequested = true;
+  }
   std::atomic<bool> callbackRequested{false};
   void request_callback() override
   {

@@ -3,6 +3,8 @@
 #include <set>
 #include <limits>
 #include <cassert>
+#include <algorithm>
+#include <cmath>
 #include <Block.h>
 
 extern bool fillAudioUnitCocoaView(AudioUnitCocoaViewInfo *viewInfo, std::shared_ptr<Clap::Plugin>);
@@ -586,17 +588,24 @@ OSStatus WrapAsAUV2::SetParameter(AudioUnitParameterID inID, AudioUnitScope inSc
 {
   if (inScope == kAudioUnitScope_Global)
   {
-    if (_processAdapter)
+    auto p = _parametertree.find(inID);
+    if (p != _parametertree.end())
     {
-      // a parameter has been set.
-      // _processAdapter->addParameterEvent(inID,inValue,inBufferOffsetInFrames);
-      auto p = _parametertree.find(inID);
-      if (p != _parametertree.end())
+      // Fenced against onIdle(), the other consumer of the adapter's event
+      // queue. Render() holding the lock is not enough on its own: AUBase calls
+      // this from ScheduleParameter(), i.e. on the render thread but outside the
+      // render, so without this the queue would have two writers.
+      ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+      if (_processAdapter)
       {
         auto &param = p->second.get()->info();
         _processAdapter->addParameterEvent(param, inValue, inBufferOffsetInFrames);
       }
     }
+
+    // Nothing may ever render this: on an idle track process() is not coming,
+    // and then onIdle() is the only thing that will hand it to the plugin.
+    _requestedFlush = true;
   }
   return AUBase::SetParameter(inID, inScope, inElement, inValue, inBufferOffsetInFrames);
 }
@@ -1227,8 +1236,6 @@ bool WrapAsAUV2::activateCLAP()
   if (_plugin)
   {
     assert(!_initialized);
-    if (!_processAdapter) _processAdapter = std::make_unique<Clap::AUv2::ProcessAdapter>();
-
     // Reconcile the host-chosen bus formats with the plugin's port layout
     // before anything reads the ports: main thread, plugin deactivated. A
     // failure here must fail the activation: ValidFormat can only vet each
@@ -1247,6 +1254,17 @@ bool WrapAsAUV2::activateCLAP()
     _plugin->setBlockSizes(minSampleFrames, maxSampleFrames);
     _plugin->setSampleRate(Output(0).GetStreamFormat().mSampleRate);
 
+    // How long onIdle() waits before it decides the host has stopped rendering.
+    // A fixed number of ticks cannot work: at 4096 frames and 44.1kHz a block is
+    // 93ms, so a host that is rendering perfectly normally leaves gaps longer
+    // than any small constant, and the idle tick would flush inside every one of
+    // them -- stealing the scheduled automation SetParameter queues, offsets and
+    // all. Three blocks is a gap no rendering host produces.
+    const double sampleRate = std::max(Output(0).GetStreamFormat().mSampleRate, 1.0);
+    const double blockMs = 1000.0 * static_cast<double>(maxSampleFrames) / sampleRate;
+    const auto ticks = static_cast<uint32_t>(std::ceil(3.0 * blockMs / kIdleTickMs));
+    _idleTicksBeforeFlush = std::max(kMinIdleTicksBeforeFlush, ticks);
+
     // the plugin's actually-declared audio port counts (0 when it has no
     // audio-ports extension); these may be fewer than the AU element counts
     uint32_t clapAudioInputs = 0, clapAudioOutputs = 0;
@@ -1256,9 +1274,20 @@ bool WrapAsAUV2::activateCLAP()
       clapAudioOutputs = _plugin->_ext._audioports->count(_plugin->_plugin, false);
     }
 
-    _processAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this,
-                                     &_parametertree, this, maxSampleFrames, _midi_preferred_dialect,
-                                     _midi_supported_dialects, clapAudioInputs, clapAudioOutputs);
+    {
+      // Built and configured under the lock: every other path that queues onto
+      // the adapter checks the pointer under it, and must not find one that is
+      // half set up (setupProcessing clears the event queue as it goes).
+      ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+      if (!_processAdapter) _processAdapter = std::make_unique<Clap::AUv2::ProcessAdapter>();
+      _processAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params,
+                                       this, &_parametertree, this, maxSampleFrames,
+                                       _midi_preferred_dialect, _midi_supported_dialects,
+                                       clapAudioInputs, clapAudioOutputs);
+      // The deactivated-state flush adapter has no further use, and the gestures
+      // it was tracking belong to the real one now.
+      _flushAdapter.reset();
+    }
 
     _plugin->activate();
     _plugin->start_processing();
@@ -1271,8 +1300,13 @@ void WrapAsAUV2::deactivateCLAP()
 {
   if (_plugin)
   {
-    _initialized = false;
-    _processAdapter.reset();
+    {
+      // Under the lock: SetParameter and the MIDI entry points test this
+      // pointer and then use it, and the idle tick may be inside a flush on it.
+      ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+      _initialized = false;
+      _processAdapter.reset();
+    }
     _plugin->stop_processing();
     _plugin->deactivate();
   }
@@ -1338,6 +1372,10 @@ OSStatus WrapAsAUV2::Render(AudioUnitRenderActionFlags &inFlags, const AudioTime
     auto it_is = _plugin->AlwaysAudioThread();
 
     _processAdapter->process(data);
+
+    // This render carried whatever was queued in either direction, so the next
+    // idle tick has nothing to make up for. See onIdle().
+    _renderedSinceIdle = true;
 
     {
       for (auto &i : _midi_outports)
@@ -1434,10 +1472,8 @@ void WrapAsAUV2::onEndEdit(clap_id id)
 #endif
 }
 
-void WrapAsAUV2::onIdle()
+void WrapAsAUV2::pushQueuedEventsToHost()
 {
-  if (!_plugin) return;
-  // run queue stuff
   queueEvent e;
   while (this->_queueToUI.pop(e))
   {
@@ -1500,6 +1536,13 @@ void WrapAsAUV2::onIdle()
       break;
     }
   }
+}
+
+void WrapAsAUV2::onIdle()
+{
+  if (!_plugin) return;
+
+  pushQueuedEventsToHost();
 
   if (_requestMarkDirty.exchange(false))
   {
@@ -1551,6 +1594,125 @@ void WrapAsAUV2::onIdle()
       }
     }
   }
+
+  // After the restart branch on purpose: a restart asked for in the same tick
+  // ends with the plugin activated and processing, which is what a wake would
+  // have been asking for anyway.
+  if (_requestProcess.exchange(false) && _plugin)
+  {
+    auto guarantee_mainthread = _plugin->AlwaysMainThread();
+
+    // AU offers a plugin nothing like this: there is no way to make the host
+    // start pulling Render(). What the wrapper does own is the CLAP's own
+    // activate/start_processing pair, which it drives from AU Initialize() --
+    // so if the AU is initialized and the CLAP is not running underneath it,
+    // stand it back up. No lock is needed to decide that: activateCLAP()
+    // publishes _initialized last, and a render that reads it false returns
+    // without touching the plugin, exactly as it does before the AU is
+    // initialized at all.
+    if (IsInitialized() && !_initialized)
+    {
+      activateCLAP();
+    }
+
+    // Whatever parameter traffic the request was really about is the flush
+    // below's problem, in either direction: ask for one.
+    _requestedFlush = true;
+  }
+
+  // The parameter flush.
+  //
+  // In CLAP a plugin can only push an output event -- a value its own editor
+  // changed, the gesture around it -- from inside process() or flush(), and the
+  // host's own parameter sets only reach the plugin the same way (SetParameter
+  // queues them on the process adapter). Both directions therefore stop dead
+  // whenever the host stops rendering, and AU hosts do stop: Logic will not run
+  // a track it knows carries no signal, and an initialized unit can sit there
+  // for minutes without a single Render() call. The VST3 SDK's AU wrapper and
+  // JUCE's never meet this because neither routes automation through the audio
+  // cycle at all -- they call AUParameterSet/AUEventListenerNotify straight from
+  // the editor callback. A CLAP has no equivalent to call, so the wrapper has to
+  // do the pulling.
+  //
+  // _requestedFlush says there is something to pull. The plugin sets it through
+  // param_request_flush(), which it may call at any moment and in any state --
+  // it is not a statement about processing, just "I have parameter events" --
+  // and SetParameter sets it for the other direction. What is left to decide
+  // here is only whether a render is going to do the job first.
+  //
+  // One empty tick is not proof the host has stopped, and guessing wrong costs
+  // something: the host schedules automation through SetParameter with a buffer
+  // offset, so a flush that beat the next render to the queue would deliver
+  // those values stripped of their offsets. How long to wait cannot be a
+  // constant either - at 4096 frames and 44.1kHz a block is 93ms, so a host
+  // rendering perfectly normally leaves gaps longer than any small number of
+  // 10ms ticks. activateCLAP() sizes the wait at three blocks, which no
+  // rendering host produces; once one really has stopped, the counter stays
+  // saturated and a request is served on the very next tick.
+  if (_renderedSinceIdle.exchange(false))
+  {
+    _idleTicksSinceRender = 0;
+  }
+  else if (_idleTicksSinceRender < _idleTicksBeforeFlush)
+  {
+    ++_idleTicksSinceRender;
+  }
+
+  if (_requestedFlush && _idleTicksSinceRender >= _idleTicksBeforeFlush)
+  {
+    // Fences against Render() and against SetParameter, the queue's other
+    // writer. While the plugin is active clap_plugin_params.flush() is
+    // [audio-thread]; the lock is what makes the idle thread stand in for it.
+    // It also keeps the single producer _queueToUI expects, since the output
+    // events this flush pulls out go down the same path a render's would.
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+
+    // Cleared before the work, not after: a request that arrives while the
+    // plugin is inside flush() is about events this flush cannot have seen, and
+    // has to survive into the next tick.
+    _requestedFlush = false;
+
+    if (_initialized && _processAdapter)
+    {
+      auto guarantee_audiothread = _plugin->AlwaysAudioThread();
+      _processAdapter->flush();
+    }
+    else
+    {
+      // Deactivated: the real adapter does not exist, and flush() is
+      // [main-thread] here.
+      auto guarantee_mainthread = _plugin->AlwaysMainThread();
+      flushParameters();
+    }
+  }
+
+  // Announce anything the flush just produced in this tick rather than the next.
+  pushQueuedEventsToHost();
+}
+
+// Builds a throwaway process adapter to flush against, for the deactivated case
+// only: the real one lives between activateCLAP() and deactivateCLAP(), and
+// clap_plugin_params.flush() is [main-thread] exactly while the plugin is
+// inactive. Callers check _initialized under _processLock.
+void WrapAsAUV2::flushParameters()
+{
+  if (!_plugin || !_plugin->_ext._params) return;
+
+  // Kept between flushes rather than built per call, the way the VST3 wrapper
+  // builds its throwaway: a gesture the plugin opens in one deactivated flush
+  // and closes in the next has to find the same adapter, because that is where
+  // the open was recorded -- a close arriving at a fresh one is dropped, and
+  // the host stays armed on the parameter. activateCLAP() releases it.
+  // No audio is involved: a zero numMaxSamples skips the silent-stream buffers,
+  // and the plugin is handed no audio ports.
+  if (!_flushAdapter)
+  {
+    _flushAdapter = std::make_unique<Clap::AUv2::ProcessAdapter>();
+    _flushAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this,
+                                   &_parametertree, this, 0, _midi_preferred_dialect,
+                                   _midi_supported_dialects, 0, 0);
+  }
+  _flushAdapter->flush();
 }
 
 OSStatus WrapAsAUV2::SaveState(CFPropertyListRef *ptPList)

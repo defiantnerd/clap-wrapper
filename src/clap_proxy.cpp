@@ -587,8 +587,8 @@ void Plugin::clapRequestRestart(const clap_host *host)
 // [thread-safe]
 void Plugin::clapRequestProcess(const clap_host *host)
 {
-  // right now, I don't know how to communicate this to the host
-  // in VST3 you can't force processing...
+  auto self = static_cast<Plugin *>(host->host_data);
+  self->_parentHost->request_process();
 }
 
 // Registers a periodic timer.
