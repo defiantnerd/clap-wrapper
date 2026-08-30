@@ -3,6 +3,8 @@
 #include <set>
 #include <limits>
 #include <cassert>
+#include <algorithm>
+#include <cmath>
 #include <Block.h>
 
 extern bool fillAudioUnitCocoaView(AudioUnitCocoaViewInfo *viewInfo, std::shared_ptr<Clap::Plugin>);
@@ -1234,8 +1236,6 @@ bool WrapAsAUV2::activateCLAP()
   if (_plugin)
   {
     assert(!_initialized);
-    if (!_processAdapter) _processAdapter = std::make_unique<Clap::AUv2::ProcessAdapter>();
-
     // Reconcile the host-chosen bus formats with the plugin's port layout
     // before anything reads the ports: main thread, plugin deactivated. A
     // failure here must fail the activation: ValidFormat can only vet each
@@ -1254,6 +1254,17 @@ bool WrapAsAUV2::activateCLAP()
     _plugin->setBlockSizes(minSampleFrames, maxSampleFrames);
     _plugin->setSampleRate(Output(0).GetStreamFormat().mSampleRate);
 
+    // How long onIdle() waits before it decides the host has stopped rendering.
+    // A fixed number of ticks cannot work: at 4096 frames and 44.1kHz a block is
+    // 93ms, so a host that is rendering perfectly normally leaves gaps longer
+    // than any small constant, and the idle tick would flush inside every one of
+    // them -- stealing the scheduled automation SetParameter queues, offsets and
+    // all. Three blocks is a gap no rendering host produces.
+    const double sampleRate = std::max(Output(0).GetStreamFormat().mSampleRate, 1.0);
+    const double blockMs = 1000.0 * static_cast<double>(maxSampleFrames) / sampleRate;
+    const auto ticks = static_cast<uint32_t>(std::ceil(3.0 * blockMs / kIdleTickMs));
+    _idleTicksBeforeFlush = std::max(kMinIdleTicksBeforeFlush, ticks);
+
     // the plugin's actually-declared audio port counts (0 when it has no
     // audio-ports extension); these may be fewer than the AU element counts
     uint32_t clapAudioInputs = 0, clapAudioOutputs = 0;
@@ -1263,9 +1274,20 @@ bool WrapAsAUV2::activateCLAP()
       clapAudioOutputs = _plugin->_ext._audioports->count(_plugin->_plugin, false);
     }
 
-    _processAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this,
-                                     &_parametertree, this, maxSampleFrames, _midi_preferred_dialect,
-                                     _midi_supported_dialects, clapAudioInputs, clapAudioOutputs);
+    {
+      // Built and configured under the lock: every other path that queues onto
+      // the adapter checks the pointer under it, and must not find one that is
+      // half set up (setupProcessing clears the event queue as it goes).
+      ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+      if (!_processAdapter) _processAdapter = std::make_unique<Clap::AUv2::ProcessAdapter>();
+      _processAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params,
+                                       this, &_parametertree, this, maxSampleFrames,
+                                       _midi_preferred_dialect, _midi_supported_dialects,
+                                       clapAudioInputs, clapAudioOutputs);
+      // The deactivated-state flush adapter has no further use, and the gestures
+      // it was tracking belong to the real one now.
+      _flushAdapter.reset();
+    }
 
     _plugin->activate();
     _plugin->start_processing();
@@ -1278,8 +1300,13 @@ void WrapAsAUV2::deactivateCLAP()
 {
   if (_plugin)
   {
-    _initialized = false;
-    _processAdapter.reset();
+    {
+      // Under the lock: SetParameter and the MIDI entry points test this
+      // pointer and then use it, and the idle tick may be inside a flush on it.
+      ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
+      _initialized = false;
+      _processAdapter.reset();
+    }
     _plugin->stop_processing();
     _plugin->deactivate();
   }
@@ -1614,25 +1641,24 @@ void WrapAsAUV2::onIdle()
   // here is only whether a render is going to do the job first.
   //
   // One empty tick is not proof the host has stopped, and guessing wrong costs
-  // something: at a large block size renders are simply rarer than the 10ms idle
-  // (2048 samples is 43ms), and the host schedules automation through
-  // SetParameter with a buffer offset, so a flush that beat the next render to
-  // the queue would deliver those values stripped of their offsets. A few
-  // consecutive empty ticks settle the question at no cost; once the host really
-  // has stopped, the counter stays saturated and a request is served on the very
-  // next tick.
-  static constexpr uint32_t idleTicksBeforeFlush = 5;
-
+  // something: the host schedules automation through SetParameter with a buffer
+  // offset, so a flush that beat the next render to the queue would deliver
+  // those values stripped of their offsets. How long to wait cannot be a
+  // constant either - at 4096 frames and 44.1kHz a block is 93ms, so a host
+  // rendering perfectly normally leaves gaps longer than any small number of
+  // 10ms ticks. activateCLAP() sizes the wait at three blocks, which no
+  // rendering host produces; once one really has stopped, the counter stays
+  // saturated and a request is served on the very next tick.
   if (_renderedSinceIdle.exchange(false))
   {
     _idleTicksSinceRender = 0;
   }
-  else if (_idleTicksSinceRender < idleTicksBeforeFlush)
+  else if (_idleTicksSinceRender < _idleTicksBeforeFlush)
   {
     ++_idleTicksSinceRender;
   }
 
-  if (_requestedFlush && _idleTicksSinceRender >= idleTicksBeforeFlush)
+  if (_requestedFlush && _idleTicksSinceRender >= _idleTicksBeforeFlush)
   {
     // Fences against Render() and against SetParameter, the queue's other
     // writer. While the plugin is active clap_plugin_params.flush() is
@@ -1672,13 +1698,21 @@ void WrapAsAUV2::flushParameters()
 {
   if (!_plugin || !_plugin->_ext._params) return;
 
-  // The VST3 wrapper builds the same throwaway for its own flush. No audio is
-  // involved -- a zero numMaxSamples skips the silent-stream buffers, and the
-  // plugin is handed no audio ports.
-  Clap::AUv2::ProcessAdapter pa;
-  pa.setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this, &_parametertree,
-                     this, 0, _midi_preferred_dialect, _midi_supported_dialects, 0, 0);
-  pa.flush();
+  // Kept between flushes rather than built per call, the way the VST3 wrapper
+  // builds its throwaway: a gesture the plugin opens in one deactivated flush
+  // and closes in the next has to find the same adapter, because that is where
+  // the open was recorded -- a close arriving at a fresh one is dropped, and
+  // the host stays armed on the parameter. activateCLAP() releases it.
+  // No audio is involved: a zero numMaxSamples skips the silent-stream buffers,
+  // and the plugin is handed no audio ports.
+  if (!_flushAdapter)
+  {
+    _flushAdapter = std::make_unique<Clap::AUv2::ProcessAdapter>();
+    _flushAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this,
+                                   &_parametertree, this, 0, _midi_preferred_dialect,
+                                   _midi_supported_dialects, 0, 0);
+  }
+  _flushAdapter->flush();
 }
 
 OSStatus WrapAsAUV2::SaveState(CFPropertyListRef *ptPList)

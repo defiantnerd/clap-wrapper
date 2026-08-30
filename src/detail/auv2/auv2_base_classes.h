@@ -425,6 +425,11 @@ class WrapAsAUV2 : public ausdk::AUBase,
     const UInt32 strippedStatus = inStatus & 0xf0U;  // NOLINT
     const UInt32 channel = inStatus & 0x0fU;         // NOLINT
 
+    // Every path that queues onto the adapter takes the process lock. A host
+    // may call the MusicDevice entry points from its MIDI thread at any time,
+    // including while the idle tick is flushing (see onIdle()) -- and the
+    // adapter's event queue takes one writer at a time.
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (_processAdapter)
     {
       _processAdapter->addMIDIEvent(inStatus, inData1, inData2, inOffsetSampleFrame);
@@ -443,6 +448,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // note-expression handling of the MIDI1 path.
   OSStatus MIDIEventList(UInt32 inOffsetSampleFrame, const struct MIDIEventList *evtlist) override
   {
+    // Held across the whole list rather than per event; handleUMPSysEx7() is
+    // called from inside it and must not take it again. See MIDIEvent().
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (!_processAdapter || !evtlist) return noErr;
 
     const bool midi2 = (evtlist->protocol == kMIDIProtocol_2_0);
@@ -502,6 +510,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   // Reassemble a UMP SysEx7 packet stream into a single CLAP SysEx event using the
   // shared reassembler; on a complete message it is already framed with 0xF0/0xF7.
+  // Called only from MIDIEventList(), which holds the process lock for the
+  // whole list -- do not take it here, it is not recursive.
   void handleUMPSysEx7(uint32_t w0, uint32_t w1, UInt32 offset)
   {
     if (!_processAdapter) return;
@@ -515,6 +525,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   OSStatus SysEx(const UInt8 *inData, UInt32 inLength) override
   {
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (_processAdapter)
     {
       // the AU SysEx entry point carries no sample offset; deliver at frame 0
@@ -528,6 +539,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
                      NoteInstanceID *outNoteInstanceID, UInt32 inOffsetSampleFrame,
                      const MusicDeviceNoteParams &inParams) override
   {
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (!_processAdapter) return kAudioUnitErr_Uninitialized;
 
     const int16_t channel = static_cast<int16_t>(inGroupID & 0x0F);
@@ -545,6 +557,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
   OSStatus StopNote(MusicDeviceGroupID inGroupID, NoteInstanceID inNoteInstanceID,
                     UInt32 inOffsetSampleFrame) override
   {
+    ClapWrapper::detail::shared::SpinLockGuard processGuard(_processLock);
     if (!_processAdapter) return kAudioUnitErr_Uninitialized;
     const int16_t channel = static_cast<int16_t>(inGroupID & 0x0F);
     _processAdapter->stopNote(static_cast<int32_t>(inNoteInstanceID), channel, inOffsetSampleFrame);
@@ -816,6 +829,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
   std::shared_ptr<Clap::Plugin> _plugin = nullptr;
 
   std::unique_ptr<Clap::AUv2::ProcessAdapter> _processAdapter;
+  // Only for the deactivated-plugin flush, where _processAdapter does not
+  // exist. Lives across flushes so gestures pair up; see flushParameters().
+  std::unique_ptr<Clap::AUv2::ProcessAdapter> _flushAdapter;
   std::atomic<bool> _initialized = false;
 
   // some info about the wrapped clap
@@ -912,6 +928,11 @@ class WrapAsAUV2 : public ausdk::AUBase,
   // consecutive idle ticks that saw no render, saturating at the point where the
   // idle tick takes over the flushing. Only onIdle() touches it.
   uint32_t _idleTicksSinceRender = 0;
+  // how many of those ticks make a stopped host, sized from the block period in
+  // activateCLAP(). See onIdle().
+  static constexpr double kIdleTickMs = 10.0;
+  static constexpr uint32_t kMinIdleTicksBeforeFlush = 5;
+  uint32_t _idleTicksBeforeFlush = kMinIdleTicksBeforeFlush;
 
   // Held by Render() for its whole body, and taken by onIdle() to fence against
   // an in-flight render before it rebuilds the plugin. See onIdle().
