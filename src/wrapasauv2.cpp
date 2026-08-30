@@ -1742,6 +1742,23 @@ bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,
   // (applyConfigurationFromBusFormats), before it activates.
   if (cache[inElement].isMain)
   {
+    // An alternate layout is accepted here on the promise that activateCLAP()
+    // pushes it into the plugin before anything renders, and CLAP only allows
+    // ports to be reconfigured while the plugin is deactivated. So once the AU
+    // is initialized that promise cannot be kept: the only channel count still
+    // valid is the one the ports actually have, which the equality above
+    // already let through. A host wanting another layout has to uninitialize
+    // first, which is the AU convention regardless.
+    //
+    // Accepting one anyway would be worse than refusing it. The AU element
+    // would report a channel count the active plugin's port does not have, and
+    // the process adapter - whose per-port pointer arrays were sized at
+    // setupProcessing - would write past them on the next render. It is also
+    // what auval tests: from an initialized 2/2 it sets the output to 1 and the
+    // input to 3, and expects both to be turned away rather than to leave the
+    // unit in a pair the plugin never advertised.
+    if (IsInitialized()) return false;
+
     const bool isInput = (inScope == kAudioUnitScope_Input);
     for (const auto &caps : _channelCapsCache)
     {
