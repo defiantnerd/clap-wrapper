@@ -169,8 +169,14 @@ Vst3Parameter *Vst3Parameter::create(uint8_t bus, uint8_t channel, uint8_t cc, V
   v.flags = Vst::ParameterInfo::kNoFlags;
   if (cc == Vst::ControllerNumbers::kCtrlProgramChange)
   {
-    v.flags |= Vst::ParameterInfo::kIsProgramChange | Vst::ParameterInfo::kCanAutomate;
+    // The host sends a MIDI track's program changes here through the
+    // channel unit's program list. Not automatable: as an automation lane it
+    // would only be one more "MIDI/controller" next to the plugin's own
+    // parameters.
+    v.flags |= Vst::ParameterInfo::kIsProgramChange;
     v.stepCount = 127;
+    utf8_to_utf16l("Program Change", (uint16_t *)(v.title), str16BufferSize(v.title));
+    utf8_to_utf16l("Program Change", (uint16_t *)(v.shortTitle), str16BufferSize(v.shortTitle));
   }
 
   v.defaultNormalizedValue = 0;
