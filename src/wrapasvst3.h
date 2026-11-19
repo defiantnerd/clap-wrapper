@@ -501,6 +501,8 @@ class ClapAsVst3 : public Steinberg::Vst::SingleComponentEffect,
   // what tells the host to look again. The selector always exists once an index
   // does - hidden while the crawl runs - and onIdle() grows it in place.
   void setupPresets();
+  // preset-load and a preset-discovery factory: setupPresets() makes a selector
+  bool offersPresets();
   void onPresetIndexComplete();
   // The selector parameter, or nullptr. Its presetCount() - never the live size
   // of _presetIndex - is what the host has been told about.

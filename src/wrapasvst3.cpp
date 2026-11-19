@@ -1417,6 +1417,11 @@ void ClapAsVst3::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
     _IMidiMappingEasy = true;
     _MIDIUnits.clear();
 
+    // A plugin with a preset selector (setupPresets) gets its program changes
+    // there. A second, automatable program change parameter per channel would
+    // only show up in the host as one more "MIDI/controller" lane.
+    const bool midiProgramChange = !offersPresets();
+
     for (uint8_t channel = 0; channel < _numMidiChannels; channel++)
     {
       // the unit for that channel
@@ -1444,20 +1449,20 @@ void ClapAsVst3::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
         parameters.addParameter(p);
         _IMidiMappingIDs[channel][i] = x++;
       }
-      // if (false)
+      // program change parameter
+      while (parameters.getParameter(x))
       {
-        // program change parameter
-        while (parameters.getParameter(x))
-        {
-          // if this happens there is a index clash between the parameter ids
-          // and the ones reserved for the IMidiMapping
-          _IMidiMappingEasy = false;
-          x++;
-        }
+        // if this happens there is a index clash between the parameter ids
+        // and the ones reserved for the IMidiMapping
+        _IMidiMappingEasy = false;
+        x++;
+      }
+      _MIDIUnits.emplace_back(midiUnitInfo.id);
+      if (midiProgramChange)
+      {
         auto p = Vst3Parameter::create(0, channel, Vst::ControllerNumbers::kCtrlProgramChange, x);
 
         p->setUnitID(midiUnitInfo.id);
-        _MIDIUnits.emplace_back(midiUnitInfo.id);
 
         parameters.addParameter(p);
 
@@ -1478,6 +1483,12 @@ void ClapAsVst3::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
         newUnit->setProgramListID(x);
 
         //_IMidiMappingIDs[channel][Vst::ControllerNumbers::kCtrlProgramChange] = x++;
+        x++;
+      }
+      else
+      {
+        // the tag stays reserved, so the next channel's ids do not move
+        addUnit(new Vst::Unit(midiUnitInfo));
         x++;
       }
     }
@@ -1520,6 +1531,21 @@ void ClapAsVst3::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
 // ----------------------------------------------------------------------------
 // clap.preset-load, published to the host as a VST3 program list
 // ----------------------------------------------------------------------------
+bool ClapAsVst3::offersPresets()
+{
+  // No point offering a list the plugin could not load from.
+  if (!_plugin || !_plugin->supportsPresetLoad()) return false;
+
+  // Shared per module: the crawl is expensive and its result is identical for
+  // every instance of the same plugin.
+  if (!_presetIndex)
+  {
+    const auto *descriptor = _library->plugins[_libraryIndex];
+    _presetIndex = Clap::PresetIndex::forPlugin(_library, descriptor->id ? descriptor->id : "");
+  }
+  return _presetIndex != nullptr;  // null: the plugin has no preset-discovery factory
+}
+
 void ClapAsVst3::setupPresets()
 {
   _presetParamId = Vst::kNoParamId;
@@ -1533,17 +1559,7 @@ void ClapAsVst3::setupPresets()
     _presetIndexToken = 0;
   }
 
-  // No point offering a list the plugin could not load from.
-  if (!_plugin || !_plugin->supportsPresetLoad()) return;
-
-  // Shared per module: the crawl is expensive and its result is identical for
-  // every instance of the same plugin.
-  if (!_presetIndex)
-  {
-    const auto *descriptor = _library->plugins[_libraryIndex];
-    _presetIndex = Clap::PresetIndex::forPlugin(_library, descriptor->id ? descriptor->id : "");
-  }
-  if (!_presetIndex) return;  // the plugin has no preset-discovery factory
+  if (!offersPresets()) return;
 
   // A free tag, away from both the CLAP parameter ids and the block the
   // IMidiMapping parameters reserve at 0xb00000.
