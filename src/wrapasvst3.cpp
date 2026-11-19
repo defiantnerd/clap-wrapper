@@ -1418,8 +1418,9 @@ void ClapAsVst3::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
     _MIDIUnits.clear();
 
     // A plugin with a preset selector (setupPresets) gets its program changes
-    // there. A second, automatable program change parameter per channel would
-    // only show up in the host as one more "MIDI/controller" lane.
+    // there: getUnitByBus() names the root unit, whose program list is the
+    // selector. A program change parameter per channel as well would only
+    // show up in the host as one more automatable "MIDI/controller" lane.
     const bool midiProgramChange = !offersPresets();
 
     for (uint8_t channel = 0; channel < _numMidiChannels; channel++)
@@ -1457,7 +1458,7 @@ void ClapAsVst3::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
         _IMidiMappingEasy = false;
         x++;
       }
-      _MIDIUnits.emplace_back(midiUnitInfo.id);
+      _MIDIUnits.emplace_back(midiProgramChange ? midiUnitInfo.id : Vst::kRootUnitId);
       if (midiProgramChange)
       {
         auto p = Vst3Parameter::create(0, channel, Vst::ControllerNumbers::kCtrlProgramChange, x);
